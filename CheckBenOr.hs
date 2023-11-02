@@ -4,7 +4,7 @@
 
 {- This module uses quickceck to generate tests for the BenOr protocol in BenOr.hs
    The testing here tries to be as agnostic as possible and makes use of different adversarial
-	 scheduling strategies inclduing censoring communication between pairs of parties, random delivery   of messages on a per-round or complete random basis.
+   scheduling strategies inclduing censoring communication between pairs of parties, random delivery   of messages on a per-round or complete random basis.
 -}
 
 module CheckBenOr where
@@ -36,33 +36,6 @@ data BenOrCmd = CmdBenOrP2F PID Bool | CmdOne SID PID Int Bool MulticastTokens |
 
 type BenOrInput = (BenOrCmd, Tokens)
 type BenOrConfig = (SID, [PID], CruptList, Int)
-
-performBenOrEnv 
-  :: (MonadEnvironment m) => 
-  BenOrConfig -> [Either BenOrInput AsyncInput] ->
-  (Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
-     --(SttCruptA2Z (SID, (MulticastF2P BenOrMsg, TransferTokens Int)) 
-     (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
-                  (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
-                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
-     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
-                  (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) Transcript m)
-performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
-    let (sid :: SID, parties :: [PID], crupt :: Map PID (), t :: Int) = benOrConfig 
-    writeChan z2exec $ SttCrupt_SidCrupt sid crupt
-
-    (lastOut, transcript, clockChan) <- envReadOut p2z a2z
-        
-    () <- readChan pump 
-  
-    writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
-    readChan clockChan
-    let n = length parties
-
-    forMseq_ cmdList $ \cmd -> do 
-        envExecCmd z2p z2a z2f clockChan pump cmd envExecBenOrCmd
-    writeChan outp =<< readIORef transcript
 
 -- TODO: here the integer here is the round number. Therefore we need to parameterize this with a range or rounds. Maybe this way we an see if it reaches consensus or there's a better way to give round numbers and iteratively increase the possible round numbers. 
 
@@ -107,6 +80,34 @@ envExecBenOrCmd z2p z2a pump cmd = do
           writeChan z2a $ ((SttCruptZ2A_A2F $ Right (ssid', (MulticastA2F_Deliver pid' (TwoD r' x'), DeliverTokensWithMessage 0))), SendTokens 0)
           readChan pump
 
+performBenOrEnv 
+  :: (MonadEnvironment m) => 
+  BenOrConfig -> [Either BenOrInput AsyncInput] ->
+  (Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
+     --(SttCruptA2Z (SID, (MulticastF2P BenOrMsg, TransferTokens Int)) 
+     (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
+                  (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
+                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
+     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
+                  (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
+     (ClockZ2F) Transcript m)
+performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+    let (sid :: SID, parties :: [PID], crupt :: Map PID (), t :: Int) = benOrConfig 
+    writeChan z2exec $ SttCrupt_SidCrupt sid crupt
+
+    (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+        
+    () <- readChan pump 
+  
+    writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
+    readChan clockChan
+    let n = length parties
+
+    forMseq_ cmdList $ \cmd -> do 
+        envExecCmd z2p z2a z2f clockChan pump cmd envExecBenOrCmd
+    writeChan outp =<< readIORef transcript
+
+
 
 -- The purpose of this generator is to test whether asynchrnous conditions and byzantine adversaries
 -- can cause parties to decide on different values. The environment:
@@ -146,7 +147,7 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   cmdList <- newIORef []  
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
   
-  (deliverer,deliverByPairs) <- envMapQueue z2a a2z clockChan lastOut pump 
+  (deliverer,deliverByPairs,getByPairs,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump 
 
   () <- readChan pump
   modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
@@ -172,7 +173,7 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   -- generate a censor list 
   --someHonest <- liftIO $ generate $ elements honest
   --censorPairs <- liftIO $ generate $ shuffle [(x,y) | (x:ys) <- tails honest, y <- ys, x == someHonest || y == someHonest] 
-	let censorPairs = [("Bob","Bob"), ("Carol","Carol"), ("Dave","Dave"), ("Eve","Eve"), ("Frank","Frank")]
+  let censorPairs = [("Bob","Bob"), ("Carol","Carol"), ("Dave","Dave"), ("Eve","Eve"), ("Frank","Frank")]
   --let censorPairs = take 1 pairsOfPIDs
 
   -- Make the protocol run --
@@ -214,7 +215,7 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   tr <- readIORef transcript
   cl <- readIORef cmdList
 
-  liftIO $ putStrLn $ "\n\t someHonest: " ++ show someHonest
+  liftIO $ putStrLn $ "\n\t someHonest: " ++ show censorPairs
   liftIO $ putStrLn $ "\t pairs: " ++ show censorPairs
   
   writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr)
@@ -228,7 +229,7 @@ prop_uBenOrSafety one two dec = monadicIO $ do
         let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
         let prot () = protBenOrBreak one two dec 0
         let crupt = ["Alice"]
-		-- TODO: commented generation of parties to test a simple aspect of the protocol
+    -- TODO: commented generation of parties to test a simple aspect of the protocol
     --parties <- liftIO $ (generate arbitrary :: IO [PID])
     --crupt <- liftIO $ (generate $ sublistOf parties) >>= return . take (length parties `div` 5)
         --let crupt = cc

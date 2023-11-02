@@ -88,7 +88,7 @@ bangF f (p2f, f2p) (a2f, f2a) _ = do
   a2ssid <- newIORef empty
 
   let newSsid ssid = do
-        liftIO $ putStrLn $ "[" ++ show ?sid ++ "] Creating new subinstance with ssid: " ++ show ssid
+        --liftIO $ putStrLn $ "[" ++ show ?sid ++ "] Creating new subinstance with ssid: " ++ show ssid
         let newSsid' _2ssid f2_ tag = do
               ff2_ <- newChan;
               _2ff <- newChan;
@@ -102,7 +102,7 @@ bangF f (p2f, f2p) (a2f, f2a) _ = do
         p <- newSsid' p2ssid f2p' "f2p"
         a <- newSsid' a2ssid f2a  "f2a"
         fork $ let ?sid = (extendSID ?sid (fst ssid) (snd ssid)) in do
-          liftIO $ putStrLn $ "in forked instance: " ++ show ?sid
+          --liftIO $ putStrLn $ "in forked instance: " ++ show ?sid
           f p a (undefined, undefined)
         return ()
 

@@ -39,8 +39,10 @@ shuffleParties pids = do return (liftIO $ (generate $ shuffle pids))
 selectPIDs :: (MonadIO m) => [PID] -> m [PID]
 selectPIDs pids = do
     s_pids <- liftIO $ (generate $ shuffle pids)
-    n <- liftIO $ (generate $ choose (1, length pids))
+    n <- liftIO $ (generate $ choose (1, length pids-1))
+    liftIO $ putStrLn $ "n: " ++ show n
     let r_pids :: [PID] = take n s_pids
+    liftIO $ putStrLn $ "rpids: " ++ show r_pids
     return r_pids
 
 -- random mod t number
@@ -97,11 +99,26 @@ rqDeliverList n = frequency
     ]
 
 -- generate indices to execute based on a frequence parameter `f`
+rqDeliverChoiceIdx :: Int -> Int -> Gen [Int]
+rqDeliverChoiceIdx n f = frequency
+    [ (1, return []),
+      (f, if n==0 then return [] else (:) <$> (choose (0,n-1)) <*> (rqDeliverChoiceIdx (n-1) f))
+    ]
+
+-- generate indices to execute based on a frequence parameter `f`
 rqDeliverChoice :: Int -> Int -> Gen [AsyncCmd]
 rqDeliverChoice n f = frequency
     [ (1, return []),
       (f, if n==0 then return [] else (:) <$> (choose (0,n-1) >>= return . CmdDeliver) <*> (rqDeliverChoice (n-1) f))
     ]
+
+makeCmdDeliver :: [Int] -> [AsyncCmd]
+makeCmdDeliver l = map CmdDeliver l
+
+rqDeliverAllIdx :: Int -> Gen [Int]
+rqDeliverAllIdx n = oneof 
+  [ if n == 0 then return [] else (:) <$> (choose (0,n-1)) <*> (rqDeliverAllIdx (n-1)) ]
+
 
 -- gen deliver commands for the whole list of size `n` in some random order
 rqDeliverAll :: Int -> Gen [AsyncCmd]
@@ -121,12 +138,12 @@ updateIndex :: Int -> [Int] -> [Int]
 updateIndex ref [] = []
 updateIndex ref (x:xs) = [if x > ref then (x-1) else x] ++ (updateIndex ref xs)
 
--- given an set of indices to censor, generate a deliver list 		
+-- given an set of indices to censor, generate a deliver list     
 --rqDeliverWithCensor :: [Int] -> Int -> Gen [AsyncCmd]
 --rqDeliverWithCensor censoredIdxs n = frequency 
---	[ (1, return []),
---		(10, if n==0 then return [] else (choose (0,n-1) >>= \i -> if (elem i censoredIdxs) then (rqDeliverWithCensor censoredIdxs n) else (:) <$> return (CmdDeliver i) <*> (rqDeliverWithCensor (updateIndex i censoredIdxs) (n-1))))
---	]
+--  [ (1, return []),
+--    (10, if n==0 then return [] else (choose (0,n-1) >>= \i -> if (elem i censoredIdxs) then (rqDeliverWithCensor censoredIdxs n) else (:) <$> return (CmdDeliver i) <*> (rqDeliverWithCensor (updateIndex i censoredIdxs) (n-1))))
+--  ]
 
 -- takes a list of indices to deliver
 -- returns a list of deliver commands wit indices
@@ -189,37 +206,50 @@ envCheckQueue :: (MonadEnvironment m) =>
 envCheckQueue z2a clockChan tk = do
   envQueueSize z2a clockChan tk >>= (\c -> return (c>0))
 
+intersect :: [Int] -> [Int] -> [Int]
+intersect l1 l2 = filter (\x -> x `elem` l2) l1
+
 invert :: (a,b) -> (b,a)
 invert (a,b) = (b,a)
 
 {- VERY HELPFUL FOR ADVERSARIAL SCHEDULUING 
    a process that grabs all leaks from fMulticast (!fMulticast) 
    determines which indices in the queue correspond to which sender/receiver pair
+   this only works for fMulticast as designed here because the assumption is
+   that the order of receivers is the same as the order in (parties :: [PID]) in 
+   the ssid of the leak
    RETURNS
-   			`doDeliver` - a function that accepts a list of censored PID pairs and deliver command. 
+        `doDeliver` - a function that accepts a list of censored PID pairs and deliver command. 
                         It exeutes the command only if te pair is not censored.
-				`deliverByPairs` - a function that accepts a list of PID pairs and only delivers runqueue
+        `deliverByPairs` - a function that accepts a list of PID pairs and only delivers runqueue
                            indices corresponding to messages between the pairs.
 -}
-envMapQueue :: (MonadEnvironment m) =>
+envMapQueue :: (MonadEnvironment m, Eq a, Show _leak, Show a) =>
   (Chan ((SttCruptZ2A (ClockP2F _p2f) (Either ClockA2F _a2f)), CarryTokens Int)) ->
   (Chan (SttCruptA2Z _f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) _f2a))) -> Chan Int -> 
   IORef (Maybe (Either (SttCruptA2Z f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) f2a)) (PID, p2z))) ->
-  Chan () ->
-    m ( ([(PID,PID)] -> AsyncCmd -> m ()), ([(PID,PID)] -> m ()) )
-envMapQueue z2a a2z clockChan lastOut pump = do
+  Chan () -> (_leak -> a) ->
+    m ( [(PID,PID)] -> AsyncCmd -> m (), 
+        [(PID,PID)] -> m (),
+        (PID,PID) -> m [Int],
+        PID -> m [Int],
+        PID -> m [Int],
+        a -> m [Int] )
+envMapQueue z2a a2z clockChan lastOut pump fil = do
   ctr <- newIORef 0
   sendPairs <- newIORef []
 
-  let handleLeak (sid :: SID, ((m, (DeliverTokensWithMessage st)), SendTokens a)) = do
-                       liftIO $ putStrLn $ "Leak handler" 
+  recvVal <- newIORef []
+
+  -- okay by default be able to search by receiver and sender
+  let handleLeak f (sid :: SID, ((m, (DeliverTokensWithMessage st)), SendTokens a)) = do
                        let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "fMulticast" $ snd sid
                        forMseq_ parties $ \p -> do 
-                         modifyIORef sendPairs $ (++ [(pidS, p)])    
-  
-  --let invert (a,b) = (b,a)
-    
-  let deliverIdx idx st censorList = do
+                         modifyIORef sendPairs $ (++ [(pidS, p)])
+                         --liftIO $ putStrLn $ "For message " ++ show m ++ ", appending " ++ show (p, f m) ++ " to recvVal"
+                         modifyIORef recvVal $ (++ [(p, f m)])
+
+  let alwaysCall = do
                        -- first get the leas
                        writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
                        () <- readChan pump
@@ -228,7 +258,19 @@ envMapQueue z2a a2z clockChan lastOut pump = do
                        t <- readIORef ctr
                        let tail = drop t leaks
                        modifyIORef ctr (+ length tail)
-                       forMseq_ tail handleLeak
+                       forMseq_ tail $ handleLeak fil
+ 
+  let deliverIdx idx st censorList = do
+                       () <- alwaysCall 
+                       ---- first get the leas
+                       --writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
+                       --() <- readChan pump
+                       --mf <- readIORef lastOut
+                       --let Just (Left (SttCruptA2Z_F2A (Left (ClockF2A_Leaks leaks)))) = mf
+                       --t <- readIORef ctr
+                       --let tail = drop t leaks
+                       --modifyIORef ctr (+ length tail)
+                       --forMseq_ tail $ handleLeak fil
                        
                        -- what is this idx
                        toFrom <- (readIORef sendPairs >>= return . (!! idx))
@@ -239,7 +281,16 @@ envMapQueue z2a a2z clockChan lastOut pump = do
                          liftIO $ putStrLn $ "\n\t" ++ show toFrom ++ " is in censorList\n"
                          writeChan pump ()
                        else do 
+                         sp <- readIORef sendPairs
+                         liftIO $ putStrLn $ "sendPairs: " ++ show (length sp)
+                         rv <- readIORef recvVal
+                         liftIO $ putStrLn $ "recvVals: " ++ show (length rv)
+                         liftIO $ putStrLn $ "delivering idx: " ++ show idx
+                         --if (length sp) <= idx || (length rv) <= idx then error $ "idx: " ++ show idx
+                         --else return ()
                          modifyIORef sendPairs (deleteNth idx)
+                         modifyIORef recvVal (deleteNth idx)
+                         --liftIO $ putStrLn $ "delivering idx: " ++ show idx
                          writeChan z2a $ ((SttCruptZ2A_A2F $ Left (ClockA2F_Deliver idx)), SendTokens st)
   let doDeliver censorList cmd = do
                case cmd of 
@@ -257,7 +308,42 @@ envMapQueue z2a a2z clockChan lastOut pump = do
               forMseq_ deliveries $ (doDeliver [])
               return ()
 
-  return (doDeliver, deliverByPairs)
+  let getByPair (ps :: (PID,PID)) = do
+              () <- alwaysCall
+              sp <- readIORef sendPairs
+              let idxs = map fst $ filter (\(_,(s,r)) -> (s,r) == ps || (r,s) == ps) $ zip [0..] sp
+              return idxs
+
+  let getBySender (p :: PID) = do
+              () <- alwaysCall
+              sp <- readIORef sendPairs
+              let idxs = map fst $ filter (\(_,(s,r)) -> p == s) $ zip [0..] sp
+              return idxs
+
+  let getByReceiver (p :: PID) = do
+              () <- alwaysCall
+              sp <- readIORef sendPairs
+              let idxs = map fst $ filter (\(_,(s,r)) -> p == r) $ zip [0..] sp
+              return idxs
+
+  let getByFilter x = do  
+              liftIO $ putStrLn $ "filtering by " ++ show x
+              () <- alwaysCall
+              vr <- readIORef recvVal
+              --let idxs = map fst $ zip [0..] $ filter (\(p', v) -> (v == x)) vr
+              let idxs = map fst $ filter (\(idx, (p', v)) -> (v == x)) $ zip [0..] vr
+              return idxs
+  
+  return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceiver, getByFilter)
+
+{-
+  * a filtering function that outputs a key and a value to store for the item
+  * a static number of functions or a dynamic number of functions?
+
+  * for benor that would be
+    filter :: (SID, ((t, TransferTokens Int), CarryTokens Int)) -> a where t = BenOrMsg
+-}
+
 
 --censoredIdxs :: (Eq a) => [(a,a)] -> [(Int, (a,a))] -> [Int]
 --censoredIdxs cL [] = []
@@ -415,9 +501,9 @@ envExecAsyncCmd z2p z2a z2f clockChan pump cmd = do
 
 
 envExecCmd :: (MonadITM m) =>
-  (Chan (PID, ((ClockP2F _z2p), CarryTokens Int) )) ->
-  (Chan ((SttCruptZ2A (ClockP2F _p2f) (Either ClockA2F _a2f)), CarryTokens Int)) ->
-  (Chan ClockZ2F) -> Chan Int -> Chan () -> (Either _protInput AsyncInput) -> 
+  (Chan (PID, ((ClockP2F _z2p), CarryTokens Int) )) -> -- z2p
+  (Chan ((SttCruptZ2A (ClockP2F _p2f) (Either ClockA2F _a2f)), CarryTokens Int)) -> --z2a
+  (Chan ClockZ2F) -> Chan Int -> Chan () -> (Either _protInput AsyncInput) -> -- z2f clockChan cmd
   (Chan (PID, ((ClockP2F _z2p), CarryTokens Int)) -> 
    Chan ((SttCruptZ2A (ClockP2F _p2f) (Either ClockA2F _a2f)), CarryTokens Int) ->
    Chan () -> _protInput ->

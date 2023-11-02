@@ -61,8 +61,12 @@ fACast (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
     else do
       return()
 
+	-- give control back to the calling party after the input is accepted
   writeChan f2p (pidS, ACastF2P_OK)
 
+-- Same as the functionality above but augmented with import tokens
+-- the functionality demands 1 unit of import per receiver in a BEST EFFORT
+-- so only k of n honest parties might receive output if only k import is given
 fACastToken :: MonadFunctionalityAsync m (a, CarryTokens Int) => Functionality ((ACastP2F a), CarryTokens Int) (ACastF2P a) Void Void Void Void m
 fACastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
   -- Sender, set of parties, and tolerance parameter is encoded in SID
@@ -78,11 +82,13 @@ fACastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
 
   -- Allow sender to choose the input
   (pid, ((ACastP2F_Input m), SendTokens a)) <- readChan p2f
+	-- TODO: at the moment we manually update import in the code rather than doing it within MonadITM
   if a>=0 then do
     tk <- readIORef tokens
     writeIORef tokens (tk+a)
   else
     error "sending negative tokens"
+
   liftIO $ putStrLn $ "[fACast]: input read " -- ++ show m
   liftIO $ putStrLn $ "[fACast]: received " ++ (show a) ++ " tokens from " ++ (show pid)
   leak (m, SendTokens a)
@@ -93,12 +99,12 @@ fACastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
     if not (Map.member pj ?crupt) then do
       eventually $ do
         tk <- readIORef tokens
-        if tk >=1 then do
+        if tk >=1 then do		-- require 1 token for each receiver
           writeIORef tokens (tk-1)  -- Burn 1 token for delivery
           liftIO $ putStrLn $ "[fACast]: tokens left: " ++ (show (tk-1))
           liftIO $ putStrLn $ "[fACast]: queued party: " ++ (show pj)
           writeChan f2p (pj, ACastF2P_Deliver m)
-        else return()
+        else return()   -- if out of tokens don't do anything
     else do
       return()
 
@@ -112,9 +118,7 @@ data ACastMsg t = ACast_VAL t | ACast_ECHO t | ACast_READY t deriving (Show, Eq,
 -- Give (fBang fMulticast) a nicer interface
 manyMulticast :: MonadProtocol m =>
      PID -> [PID]
-     -- -> (Chan (SID, (MulticastF2P t, TransferTokens Int)), Chan (SID, ((t, TransferTokens Int), CarryTokens Int)))
      -> (Chan (SID, (MulticastF2P t, CarryTokens Int)), Chan (SID, ((t, TransferTokens Int), CarryTokens Int)))
-     -- -> m (Chan (PID, (t, TransferTokens Int)), Chan ((t, TransferTokens Int), CarryTokens Int), Chan ())
      -> m (Chan (PID, (t, CarryTokens Int)), Chan ((t, TransferTokens Int), CarryTokens Int), Chan ())
 manyMulticast pid parties (f2p, p2f) = do
   p2f' <- newChan
@@ -132,14 +136,11 @@ manyMulticast pid parties (f2p, p2f) = do
     (ssid, mf) <- readChan f2p
     let (pidS :: PID, _ :: [PID], _ :: String) = readNote "manyMulti" $ snd ssid
     case mf of
-      --(MulticastF2P_OK, DeliverTokensWithMessage _) -> do
       (MulticastF2P_OK, SendTokens _) -> do
                      require (pidS == pid) "ok delivered to wrong pid"
                      writeChan cOK ()
-      --(MulticastF2P_Deliver m, DeliverTokensWithMessage t) -> do
       (MulticastF2P_Deliver m, SendTokens t) -> do
                      writeChan f2p' (pidS, (m, SendTokens t))
-                     --writeChan f2p' (pidS, (m, DeliverTokensWithMessage t))
   return (f2p', p2f', cOK)
 
 readBangMulticast pid parties f2p = do
@@ -164,8 +165,7 @@ readBangAnyOrder f2p = do
   return c
 
 
--- More utils
-
+-- Simple test environment for fACast
 testEnvACastIdeal
   :: MonadEnvironment m =>
   Environment (ACastF2P String) (ClockP2F (ACastP2F String)) (SttCruptA2Z a (Either (ClockF2A String) Void)) (SttCruptZ2A b (Either ClockA2F Void)) Void (ClockZ2F) String m
@@ -201,13 +201,14 @@ testEnvACastIdeal z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 
   writeChan outp "environment output: 1"
 
+-- fACast with dummy adv make sure it works as intended in the benign setting
 testACastBenign :: IO String
 testACastBenign = runITMinIO 120 $ execUC testEnvACastIdeal (idealProtocol) (runAsyncF $ fACast) dummyAdversary
 
-
+-- the type of the transcript output by
+-- environments. TODO: abstract away the environment types this is horrendous
 type Transcript = [Either
                          (SttCruptA2Z
-                            --(SID, (MulticastF2P (ACastMsg String), TransferTokens Int))
                             (SID, (MulticastF2P (ACastMsg String), CarryTokens Int))
                             (Either
                                (ClockF2A (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int)))
@@ -276,6 +277,9 @@ testACastReal = runITMinIO 120 $ execUC
   (runAsyncF $ bangFAsync fMulticastToken)
   dummyAdversaryToken
 
+-- a TESTING version of the protocol realizing fACast in order to test broken 
+-- code pieces. The arguments exist only to test thresholds being set incorrectly
+-- which the SIMPLEST form of error. TODO: can we write more nuanced errors? 
 protACastBroken :: MonadAsyncP m => ACastTVariant -> ACastRVariant -> ACastDVariant ->
                                     Protocol ((ClockP2F (ACastP2F String)), CarryTokens Int) (ACastF2P String)
                                              --(SID, (MulticastF2P (ACastMsg String), TransferTokens Int))
@@ -292,20 +296,15 @@ protACastBroken variantT variantR variantD (z2p, p2z) (f2p, p2f) = do
   echoes <- newIORef (Map.empty :: Map String (Map PID ()))
   readys <- newIORef (Map.empty :: Map String (Map PID ()))
   tokens <- newIORef 0
-
-  -- Require means print the error then pass
-  --let require cond msg = 
-  --      if not cond then do
-  --        liftIO $ putStrLn $ msg
-  --        ?pass
-  --        readChan =<< newChan -- block without returning
-  --      else return ()
   
 {- TESTING MODS -}          
   f2p' <- newChan
   z2p' <- newChan
   failed <- newIORef False
 
+	-- new require where the machine halts after a require check has failed
+	-- a global flag `failed` is used and if set, activation just gives control
+	-- back to the environment with ?pass
   let require cond msg = do
         if not cond then do
           liftIO $ putStrLn $ msg
@@ -330,15 +329,16 @@ protACastBroken variantT variantR variantD (z2p, p2z) (f2p, p2f) = do
        
   -- Prepare channels
   (recvC, multicastC, cOK) <- manyMulticast ?pid parties (f2p', p2f)
+
   let multicast (x, DeliverTokensWithMessage st) = do
         tk <- readIORef tokens
         let neededTokens = (length parties) * (st+1)  -- The multicast requires sending st tokens to each party, plus 1 delivery fee for each message
         writeIORef tokens (max 0 (tk-neededTokens))  -- Try to send the required tokens in a best effort approach
         liftIO $ putStrLn $ ">>>>>. Multicasting [" ++ show ?pid ++ "] " ++ show x ++ " with SendTokens " ++ show (min tk neededTokens) ++ " and DeliverTokensWithMessage " ++ show st
-
         -- st specifies the tokens F will send to each party; SendTokens represents the tokens F will receive
         writeChan multicastC ((x, DeliverTokensWithMessage st), SendTokens (min tk neededTokens))
         readChan cOK
+
   let recv = readChan recvC -- :: m (ACastMsg t)
 
   -- For sending ready just once

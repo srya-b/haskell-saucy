@@ -481,7 +481,35 @@ testSelect = runITMinIO 120 $ do
   fork  $ flipWrite a b
   res <- selectRead a b
   liftIO $ putStrLn $ show res  
-      
+     
+
+{-- Can channels be moved to different reds -}
+proc1 a r = do
+  fork $ forever $ do
+    () <- readChan r
+    liftIO $ putStrLn "read dupicate"
+    writeChan a ()
+  return ()
+
+proc2 a b = do
+  fork $ forever $ do
+    readChan a
+    writeChan b ()
+  return ()
+
+testMove = runITMinIO 120 $ do
+  a <- newChan
+  b <- newChan
+  c1 <- newChan
+  c2 <- dupChan c1
+  proc1 b c2
+  proc2 a c1
+  writeChan a ()
+  readChan b
+  liftIO $ putStrLn $ "resetting c1"
+  c1 <- newChan
+  writeChan a ()
+  readChan b
 
 {--- Counter examples.
    Why are the ILC rules defined the way they are?

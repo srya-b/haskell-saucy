@@ -102,12 +102,16 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
         r <- readIORef runqueue
         writeChan f2a $ (Left $ ClockF2A_Count (length r))
       Left ClockA2F_GetLeaks -> do
+        r <- readIORef runqueue
+        liftIO $ putStrLn $ "[In GetLeaks] runqueue: " ++ show (length r)
         l <- readIORef leaks
         writeChan f2a $ (Left $ ClockF2A_Leaks l)
       Left (ClockA2F_Deliver idx) -> do
                      q <- readIORef runqueue
                      if (length q) > idx then do
                        --liftIO $ putStrLn $ "Queue Size: " ++ (show (length q))
+                       rq <- readIORef runqueue
+                       liftIO $ putStrLn $ "delivering"
                        modifyIORef runqueue (deleteNth idx)
                        writeChan (q !! idx) ()
                      else do
@@ -149,6 +153,8 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
       if length rq > 0 then do
           -- Deliver the first message, remove it from buffer
           --liftIO $ putStrLn $ "Queue Size: " ++ (show (length rq))
+          rq <- readIORef runqueue
+          liftIO $ putStrLn $ "155: delivering:"
           modifyIORef runqueue (deleteNth 0)
           liftIO $ putStrLn $ "[fAsync] sending callback"
           writeChan (rq !! 0) ()
@@ -391,16 +397,16 @@ runAsyncP prot (z2p, p2z) (f2p, p2f) = do
 --        writeChan p2f ClockP2F_Pass
 --  p2f' <- wrapWrite ClockP2F_Through p2f
 --
---	runqueue <- newIORef []
---	delay <- newIORef 0
+--  runqueue <- newIORef []
+--  delay <- newIORef 0
 --
---	let _eventually m = do
---				c :: Chan () <- newChan
---				modifyIORef runqueue (++ [c])
---				modifyIORef delay (+1)
---				l <- (readIORef runqueue >>= return . length)
---				fork $ readchan c >> m
---				return ()
+--  let _eventually m = do
+--        c :: Chan () <- newChan
+--        modifyIORef runqueue (++ [c])
+--        modifyIORef delay (+1)
+--        l <- (readIORef runqueue >>= return . length)
+--        fork $ readchan c >> m
+--        return ()
 --
 --  let ?pass = pass in
 --     prot (z2p, p2z) (f2p,p2f')
