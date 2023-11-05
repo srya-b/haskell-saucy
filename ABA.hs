@@ -166,10 +166,10 @@ data SBcastVariant = SBcastSmall | SBcastLarge | SBcastCorrect deriving (Show, E
 data SBSVariant = SBSSmall | SBSLarge | SBSCorrect deriving (Show, Eq)
 
 sBroadcastBreak :: (MonadIO m, MonadITM m) => SBcastVariant -> SBSVariant ->
-    IORef Int -> IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
+    IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
     Chan (PID, (CoinCastF2P ABACast)) -> Chan (SID, (CoinCastP2F ABACast, CarryTokens Int)) -> 
-    Chan () -> Chan () -> IORef (Map Bool Bool) -> Bool -> m () -> m ()
-sBroadcastBreak castVariant valVariant tokens totSent tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass = do
+    Chan () -> Chan () -> IORef Bool -> Bool -> m () -> m ThreadId
+sBroadcastBreak castVariant valVariant tokens tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass = do
   --let (parties :: [PID], t :: Int, sssid :: String) = readNote "protABA" $ snd ?sid
   --let n = length parties
   let t = tThreshold
@@ -181,42 +181,48 @@ sBroadcastBreak castVariant valVariant tokens totSent tThreshold pid parties rou
                         SBSSmall -> 2*t
                         SBSLarge -> 2*t+2
                         SBSCorrect -> 2*t + 1
-  (sBroadcastBroken castThreshold svalThreshold tokens totSent tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass)
+  (sBroadcastBroken castThreshold svalThreshold tokens tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass)
 
 sBroadcast :: (MonadIO m, MonadITM m) =>
-    IORef Int -> IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
+    IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
     Chan (PID, (CoinCastF2P ABACast)) -> Chan (SID, (CoinCastP2F ABACast, CarryTokens Int)) -> 
-    Chan () -> Chan () -> IORef (Map Bool Bool) -> Bool -> m () -> m ()
+    Chan () -> Chan () -> IORef Bool -> Bool -> m () -> m ThreadId
 sBroadcast = sBroadcastBreak SBcastCorrect SBSCorrect
 
---sBroadcast :: (MonadIO m, MonadITM m) =>
+--sBroadcastBroken :: (MonadIO m, MonadITM m) => Int -> Int ->
 --    IORef Int -> IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
 --    Chan (PID, (CoinCastF2P ABACast)) -> Chan (SID, (CoinCastP2F ABACast, CarryTokens Int)) -> 
 --    Chan () -> Chan () -> IORef (Map Bool Bool) -> Bool -> m () -> m ()
---sBroadcast tokens totSent tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass = do
+-- EDIT: bin_ptr is no longer a map but just a regular IORef to a bool
+--       totSent not used
 sBroadcastBroken :: (MonadIO m, MonadITM m) => Int -> Int ->
-    IORef Int -> IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
+    IORef Int -> Int -> PID -> [PID] -> Int -> Bool -> 
     Chan (PID, (CoinCastF2P ABACast)) -> Chan (SID, (CoinCastP2F ABACast, CarryTokens Int)) -> 
-    Chan () -> Chan () -> IORef (Map Bool Bool) -> Bool -> m () -> m ()
-sBroadcastBroken castThreshold svalThreshold tokens totSent tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass = do
+    Chan () -> Chan () -> IORef Bool -> Bool -> m () -> m ThreadId
+sBroadcastBroken castThreshold svalThreshold tokens tThreshold pid parties round bit f2p p2f okChan toMainChan binptr shouldBCast pass = do
     -- set the current bin_ptr[s_i] = False because main protocol will wait till one of them is True
-    modifyIORef binptr $ Map.insert bit False
+    --modifyIORef binptr $ Map.insert bit False
+    -- EDIT: no longer set it here 
+    --writeIORef binptr False
     vCount <- newIORef 0
     receivedESTFrom <- newIORef $ (Map.empty :: Map PID ())
-    receivedAUXFrom <- newIORef $ (Map.empty :: Map PID ())
+    let print s = do
+                    liftIO $ putStrLn $ "[ SBCast " ++ show pid ++ ", " ++ show round ++ ", " ++ show bit ++ "] " ++ show s
 
     -- the SSID for the sub-session of fMulticats this instance of sBroadcast will use      
     let sidmycast :: SID = (show ("sbcast", pid, round, bit), show (pid, parties, ""))
-    liftIO $ putStrLn $ "\t\t\t\t[" ++ show pid ++ "] sbcast (" ++ show bit ++ ", " ++ show shouldBCast ++ ")"
+    --liftIO $ putStrLn $ "\t\t\t\t[" ++ show pid ++ "] sbcast (" ++ show bit ++ ", " ++ show shouldBCast ++ ")"
+    print ("should_bcast: " ++ show shouldBCast)
 
     let multicast (x, DeliverTokensWithMessage st) = do
               tk <- readIORef tokens
               let neededTokens = (length parties) * (st+1)
               writeIORef tokens (max 0 (tk-neededTokens))
-              liftIO $ putStrLn $ ">>>>>>> Multicasting [" ++ show pid ++ "]: ((" ++ show x ++ ", DeliverTokensWithMessage " ++ show st ++ "), SendTokens " ++ show (min tk neededTokens) ++ ")"
+              print (">>>>> Multicasting: ((" ++ show x ++ ", DeliverTokensWithmessage " ++ show st ++ "), SentTokens " ++ show (min tk neededTokens) ++ ")")
               
               writeChan p2f (sidmycast, (CoinCastP2F_cast (x, DeliverTokensWithMessage st), SendTokens (min tk neededTokens)))
               readChan okChan
+              print ("Waiting for OK for Multicast")
 
     if shouldBCast then do
         -- broadcast the proposed value
@@ -228,54 +234,61 @@ sBroadcastBroken castThreshold svalThreshold tokens totSent tThreshold pid parti
     else
         return ()
 
-    fork $ forever $ do
+    tid <- fork $ forever $ do
         -- assumed we're receiving from the correct session of fMulticast by the dispatcher
         -- in the main protocol body
         --(from, (m, SendTokens tks)) <- readChan f2p
+        --print ("waiting for an f2p")
         (from, m) <- readChan f2p
 
         case m of
+            -- EDIT: this process now needs to check round
             -- Receiving messages from other parties with TAG,S_VAL(v_i) where TAG is EST[r_i] where r_i is the round this sBroadcast is for
             --CastF2P_Deliver (EST r b) -> do
             CoinCastF2P_Deliver (EST r b) -> do
                 -- Only consider messages received for the same `bit` and from other parties
-                receivedFromPidS <- readIORef receivedESTFrom >>= return . (member from)
+                if r == round then do
+                  receivedFromPidS <- readIORef receivedESTFrom >>= return . (member from)
 
-                -- Only accept EST messages from new parties
-                if (b == bit) && (not receivedFromPidS) then do
-                    -- bit should only be received on not broadcast
-                    -- count how many we've received
-                    modifyIORef vCount $ (+) 1
-                    modifyIORef receivedESTFrom $ Map.insert from ()
+                  -- Only accept EST messages from new parties
+                  if (b == bit) && (not receivedFromPidS) then do
+                      -- bit should only be received on not broadcast
+                      -- count how many we've received
+                      modifyIORef vCount $ (+) 1
+                      modifyIORef receivedESTFrom $ Map.insert from ()
 
-                    v <- readIORef vCount
-                    liftIO $ putStrLn $ "[" ++ show pid ++ ", " ++ show bit ++ "] vcount: " ++ show v
+                      v <- readIORef vCount
+                      print ("vcount: " ++ show v)
 
-                    --if (v == (tThreshold + 1)) then do
-                    if (v == castThreshold) then do
-                        -- only broadcast EST round bit if we haven't before
-                        if (not shouldBCast) then do
-{- TOKENS: (N+1) -}
-                            multicast (EST round bit, DeliverTokensWithMessage 0)
-                            --writeChan p2f (sidmycast, (CoinCastP2F_cast (EST round bit, DeliverTokensWithMessage 0), SendTokens 0))
-                            --readChan okChan
-                            pass
-                        else do
-                            pass
-                    --else if v == ((tThreshold * 2) + 1) then do
-                    else if v == svalThreshold then do
-                        -- if the second threshold is reached for this bit then set the svalue_i (i.e. the bin_ptr[bit]) to True
-                        liftIO $ putStrLn $ "\nsBroadcast [" ++ show pid  ++ ", " ++ show bit ++ ", " ++ show round ++ ", " ++ show shouldBCast ++ "] svalue for " ++ show bit ++ " is True\n"
-                        modifyIORef binptr $ Map.insert bit True
-                        -- notify the main protocol that this sBroadcast value has been set to True
-                        writeChan toMainChan ()  
-                    else do
-                        pass
+                      --if (v == (tThreshold + 1)) then do
+                      if (v == castThreshold) then do
+                          -- only broadcast EST round bit if we haven't before
+                          if (not shouldBCast) then do
+{- TOKENS: (N+1)   -}
+                              multicast (EST round bit, DeliverTokensWithMessage 0)
+                              --writeChan p2f (sidmycast, (CoinCastP2F_cast (EST round bit, DeliverTokensWithMessage 0), SendTokens 0))
+                              --readChan okChan
+                              pass
+                          else do
+                              pass
+                      --else if v == ((tThreshold * 2) + 1) then do
+                      else if v == svalThreshold then do
+                          -- if the second threshold is reached for this bit then set the svalue_i (i.e. the bin_ptr[bit]) to True
+                          print ("svalue is True")
+                          -- modifyIORef binptr $ Map.insert bit True
+                          -- EDIT: don't set binptr to True, infor the waiting thread ONLU
+                          --writeIORef binptr True
+                          -- notify the main protocol that this sBroadcast value has been set to True
+                          writeChan toMainChan ()  
+                      else do
+                          pass
+                  else pass
                 else pass
-            _ -> pass 
+            _ -> error "Shouldn't be getting non EST messages"
 
     -- pass control back to the main protocol body
-    writeChan toMainChan ()
+    --writeChan toMainChan ()
+    return tid
         
 
 --data ABAF2P = ABAF2P_Out Bool deriving Show
@@ -315,6 +328,11 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
     let ro_sid r = (show ("sRO", r), show("-1", parties, "")) 
     let gprint s r = do
                     liftIO $ putStrLn $ "\ESC[32m [" ++ show pid ++ ", " ++ show r ++ "] " ++ show s ++ "\ESC[0m"
+    let print s r = do
+                    liftIO $ putStrLn $ "[" ++ show pid ++ ", " ++ show r ++ "] " ++ show s
+    
+    let mprint s r = do
+                    liftIO $ putStrLn $ "\t\t\t\t[" ++ show pid ++ ", " ++ show r ++ "] " ++ show s
 
 {- [TOKENS] -}
     tokens <- newIORef 0
@@ -322,18 +340,39 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
     receivedAUXFrom <- newIORef $ (Map.empty :: Map PID ())
 
     -- bin_ptrs hold the s_values for each bit, initially both False
-    binptr <- newIORef (empty :: Map Bool Bool)
-    modifyIORef binptr $ Map.insert False False
-    modifyIORef binptr $ Map.insert True False
+    --binptr <- newIORef (empty :: Map Bool Bool)
+    binPtrT <- newIORef False
+    binPtrF <- newIORef False
+    --modifyIORef binptr $ Map.insert False False
+    --modifyIORef binptr $ Map.insert True False
 
     -- Separate views that counts unique parties that have sent a TRUE aux message for each round
     viewRTrue <- newIORef (empty :: Map Int Int)
     viewRFalse <- newIORef (empty :: Map Int Int)
+    view <- newIORef (empty :: Map Int Int)
 
     -- read message and route to either sBroadcast or to the main protocol
-    f2sbChans <- newIORef (empty :: Map (Int, Bool) (Chan (PID, (CoinCastF2P ABACast))))
-    f2sbOKChans <- newIORef (empty :: Map (Int, Bool) (Chan ()))
-    sb2mainChans <- newIORef (empty :: Map Int (Chan ()))
+    -- EDIT: only need 2 f2sbChans for T and F
+    -- EDIT: only need 1 OK chans
+    --f2sbChans <- newIORef (empty :: Map (Int, Bool) (Chan (PID, (CoinCastF2P ABACast))))
+    --f2sbOKChans <- newIORef (empty :: Map (Int, Bool) (Chan ()))
+    --sb2mainChans <- newIORef (empty :: Map Int (Chan ()))
+    -- EDIT: new channel
+    sb2MainChan :: Chan () <- newChan 
+    sb2MainChanT :: Chan () <- newChan
+    sb2MainChanF :: Chan () <- newChan
+    f2sbChanTReal :: Chan (PID, (CoinCastF2P ABACast)) <- newChan
+    f2sbChanFReal :: Chan (PID, (CoinCastF2P ABACast)) <- newChan
+    f2sbChanT <- newIORef f2sbChanTReal
+    f2sbChanF <- newIORef f2sbChanFReal
+    -- EDIT: don't need a different OK chan each time because Ok only happens on multicast
+    --       old SBCast aren't multcasting anything because they aren't receiving any new messages 
+    f2sbOKChan <- newChan
+
+    tempTid <- fork $ return ()
+    tempFid <- fork $ return ()
+    sbTid <- newIORef tempTid
+    sbFid <- newIORef tempFid
     
     viewReady <- newChan
     f2mainOK <- newChan
@@ -342,20 +381,22 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
 
     -- roundSValue used by the dispatcher to ignore future messages for a round once one of the s_values is already True
     -- TODO: this may be the wrong approach, with a channel that notfied of a True s_value you never have the case that both s_values are True because the channel makes in synchronous in that sense, maybe this is a conquence of UC that we need to discuss 
-    roundSValue <- newIORef (empty :: Map Int Bool)
+    --roundSValue <- newIORef (empty :: Map Int Bool)
     f2p' <- newChan
     f2p'' <- newChan
     decided <- newIORef False
     decision <- newIORef False 
 
 
-    -- get the message channel for the SBroadcast instance
-    let getSChan s r b d = do
-            readIORef f2sbChans >>= return . (! (r, b))
+    -- EDIT: no longer needed
+    ---- get the message channel for the SBroadcast instance
+    --let getSChan s r b d = do
+    --        readIORef f2sbChans >>= return . (! (r, b))
 
-    -- get the OK channel for the SBroadcast instance
-    let getOKChan s r b d = do 
-            readIORef f2sbOKChans >>= return . (! (r, b))
+    -- EDIT: no longer needed
+    ---- get the OK channel for the SBroadcast instance
+    --let getOKChan s r b d = do 
+    --        readIORef f2sbOKChans >>= return . (! (r, b))
 
     -- Compute the ssid from the broadcast parameters
     -- Identify messages by sid, round, and bit of SBroadcast
@@ -380,6 +421,11 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
             --    writeChan f2p' (s, m)
    
 
+    nMinusTChan <- newChan
+    binPtrRead <- newChan
+
+    round <- newIORef 0
+  
     -- dispatcher from F to sBroadcast and main protocol body  
     -- and dispatcher between sBroadcast and main protocol body
     fork $ forever $ do
@@ -388,105 +434,176 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
         isDecided <- readIORef decided
         --readIORef viewRTrue >>= return . (("[" ++ ?pid ++ "] viewRTrue") ++) . show
         --readIORef viewRFalse >>= return . (("[" ++ ?pid ++ "] viewRFalse") ++) . show
-        if not isDecided then do
-            let (pidS :: PID, fParties :: [PID], ssid :: String) = readNote "fMulticastAndCoin" $ snd s
-            let (sstring :: String, _pidS :: PID, _round :: Int, _bit :: Bool) = readNote "" $ fst s
-            -- send to the right sBroadcast or the main protocol body based on ssid
-            gprint ("getting something " ++ show m ++ " from " ++ show _pidS) _round
-            case m of 
-                CoinCastF2P_Deliver (EST r b) -> do
-                --CastF2P_Deliver (EST r b) -> do
-                    -- give the message to the sbcast for this round and bit
-                    -- if one of the sbcasts has already set its svalues for TRUE for this round 
-                    -- then ignore further messages. TODO: this prohibits the case in the code where
-                    -- svalues for both sbcasts is TRUE
-                    exists <- readIORef f2sbChans >>= return . (member (r, b))
-                    --alreadySValues <- readIORef roundSValue >>= return . (! r)
-                    gprint ("Exists " ++ show exists) r
-                    --if exists && not alreadySValues then do
-                    if exists then do
-                        gprint ("Routing to SBCast") r
-                        _toS <- getSChan s r b f2sbChans
-                        writeChan _toS (pidS, m)
-                    else do
-                        ?pass 
-                CoinCastF2P_Deliver (AUX r b) -> do
-                    -- track the view[r_i]   
-                    --shit1 <- readIORef viewRTrue 
-                    --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRTrue: " ++ show shit1 
-                    --shit2 <- readIORef viewRFalse
-                    --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRFalse: " ++ show shit2
-                    receivedFromPidS <- readIORef receivedAUXFrom >>= return . (member pidS)
-                    if (not receivedFromPidS) then do
-                      if b == True then do
-                          modifyIORef viewRTrue $ Map.insertWith (\_ old -> old+1) r 1
-                          numTrue <- readIORef viewRTrue >>= return . (! r)
-                          liftIO $ putStrLn $ "\t\t\t\t\t\t[" ++ show pid ++ ", " ++ show m ++ "] num true: " ++ show numTrue ++ " from " ++ show pidS
-                      else do
-                          modifyIORef viewRFalse $ Map.insertWith (\_ old -> old+1) r 1
-                          numFalse <- readIORef viewRFalse >>= return . (! r)
-                          liftIO $ putStrLn $ "\t\t\t\t\t\t[" ++ show pid ++ ", " ++ show m ++ "] num false: " ++ show numFalse ++ " from " ++ show pidS
-                      --shit1 <- readIORef viewRTrue 
-                      --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRTrue: " ++ show shit1 
-                      --shit2 <- readIORef viewRFalse
-                      --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRFalse: " ++ show shit2
-                      modifyIORef receivedAUXFrom $ Map.insert pidS ()
-                      -- Determine whetherh view[r] is satisified for either of the bits
-                      isTrue <- readIORef viewRTrue >>= return . (member r) 
-                      isFalse <- readIORef viewRFalse >>= return . (member r)
-                      result <- if isTrue && isFalse then do
-                                    tN <- readIORef viewRTrue >>= return . (! r)
-                                    fN <- readIORef viewRFalse >>= return . (! r)
-                                    if tN == thresh && fN == thresh then return True else return False
-                                else if isTrue then do 
-                                    tN <- readIORef viewRTrue >>= return . (! r)
-                                    if tN == thresh then return True else return False
-                                else do
-                                    fN <- readIORef viewRFalse >>= return . (! r)
-                                    if fN == thresh then return True else return False
-                      -- if some view[r] is satisfied notify the main code block
-                      if result then writeChan viewReady () else ?pass
-                    else return ()
-                CoinCastF2P_OK -> do
-                --CastF2P_OK -> do
-                    -- Deliver the OK message back from fMulticast when bcasting
-                    -- to either the sbcast or the main body
-                    if sstring == "sbcast" then do
-                        _toOK <- getOKChan s _round _bit f2sbOKChans
-                        writeChan _toOK ()
-                    else
-                        writeChan f2mainOK ()
-                _ -> 
-                    writeChan viewReady ()
-        else ?pass
-
-    -- Create the channels for the sBroadcast to use
-    -- One channel for p2f --> sbcast, one for p2f OK --> sbcast, and sbcast --> main
-    let newSBcastChan _round _bit _f2sb _f2sbok _sb2main = do
-                _S <- newChan
-                _OK <- newChan
-                _toMain <- newChan
-                modifyIORef _f2sb $ Map.insert (_round, _bit) _S
-                modifyIORef _f2sbok $ Map.insert (_round, _bit) _OK
-
-                exists <- readIORef _sb2main >>= return . (member _round)
-                if exists then do
-                    ch <- readIORef _sb2main >>= return . (! _round)
-                    return (_S, _OK, ch)
+        -- EDIT keep going even if decided
+        --if not isDecided then do
+        let (pidS :: PID, fParties :: [PID], ssid :: String) = readNote "fMulticastAndCoin" $ snd s
+        let (sstring :: String, _pidS :: PID, _round :: Int, _bit :: Bool) = readNote "" $ fst s
+        -- send to the right sBroadcast or the main protocol body based on ssid
+        currRound <- readIORef round
+        gprint ("getting something " ++ show m ++ " from " ++ show _pidS) currRound
+        case m of 
+            CoinCastF2P_Deliver (EST r b) -> do
+            --CastF2P_Deliver (EST r b) -> do
+                -- give the message to the sbcast for this round and bit
+                -- if one of the sbcasts has already set its svalues for TRUE for this round 
+                -- then ignore further messages. TODO: this prohibits the case in the code where
+                -- svalues for both sbcasts is TRUE
+                -- EDIT: always give to the current SBCast and it ignores stuff for the wrong
+                --       round
+                --exists <- readIORef f2sbChans >>= return . (member (r, b))
+                --alreadySValues <- readIORef roundSValue >>= return . (! r)
+                --gprint ("Exists " ++ show exists) r
+                --if exists && not alreadySValues then do
+                -- EDIT: this should always exist
+                --if exists then do
+                if b == True then do
+                  print ("rouding to SBCast T") r
+                  f2TChan <- readIORef f2sbChanT
+                  writeChan f2TChan (pidS, m)
                 else do
-                    modifyIORef _sb2main $ Map.insert _round _toMain
-                    return (_S,_OK, _toMain)
+                  print ("routing to SBCASt F") r
+                  f2FChan <- readIORef f2sbChanF
+                  writeChan f2FChan (pidS, m)
+                --gprint ("Routing to SBCast") r
+                --_toS <- getSChan s r b f2sbChans
+                --writeChan _toS (pidS, m)
+                --else do
+                --    ?pass 
+            CoinCastF2P_Deliver (AUX r b) -> do
+                -- track the view[r_i]   
+                --shit1 <- readIORef viewRTrue 
+                --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRTrue: " ++ show shit1 
+                --shit2 <- readIORef viewRFalse
+                --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRFalse: " ++ show shit2
+                -- EDIT: count all AUX as the same
+                print ("Aux message") r
+                receivedFromPidS <- readIORef receivedAUXFrom >>= return . (member pidS)
+                if (not receivedFromPidS) then do
+                  print ("new from this pid") r
+                  -- EDIT: only accepting AUX of the current round
+                  r' <- readIORef round
+                  if r == r' then do
+                    modifyIORef view $ Map.insertWith (\_ old -> old+1) r 1
+                    numView <- readIORef view >>= return . (! r)
+                    print ("\t\t\t\t\t num aux: " ++ show numView ++ " from " ++ show pidS) r
+                  --if b == True then do
+                  --    modifyIORef viewRTrue $ Map.insertWith (\_ old -> old+1) r 1
+                  --    numTrue <- readIORef viewRTrue >>= return . (! r)
+                  --    liftIO $ putStrLn $ "\t\t\t\t\t\t[" ++ show pid ++ ", " ++ show m ++ "] num true: " ++ show numTrue ++ " from " ++ show pidS
+                  --else do
+                  --    modifyIORef viewRFalse $ Map.insertWith (\_ old -> old+1) r 1
+                  --    numFalse <- readIORef viewRFalse >>= return . (! r)
+                  --    liftIO $ putStrLn $ "\t\t\t\t\t\t[" ++ show pid ++ ", " ++ show m ++ "] num false: " ++ show numFalse ++ " from " ++ show pidS
+                  --shit1 <- readIORef viewRTrue 
+                  --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRTrue: " ++ show shit1 
+                  --shit2 <- readIORef viewRFalse
+                  --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] viewRFalse: " ++ show shit2
+                    modifyIORef receivedAUXFrom $ Map.insert pidS ()
+                  -- Determine whetherh view[r] is satisified for either of the bits
+        
+                  -- EDIT: make sure there is at least one true bin_ptr or keep waiting
+                    b0 <- readIORef binPtrT
+                    b1 <- readIORef binPtrF
+                    print ("thresh: " ++ show thresh) r
+                    if (numView == thresh) then do
+                      --if (b0 || b1) then writeChan viewReady () 
+                      --else error ("[" ++ show ?pid ++ "] n-t AUX but no binptr. how??")
+                      -- EDIT: only return n-t, set a boolean flag
+                      writeChan nMinusTChan ()
+                    else ?pass
+                  else do
+                    print ("not from this round") r
+                    ?pass
+
+                  --isTrue <- readIORef viewRTrue >>= return . (member r) 
+                  --isFalse <- readIORef viewRFalse >>= return . (member r)
+                  --result <- if isTrue && isFalse then do
+                  --              tN <- readIORef viewRTrue >>= return . (! r)
+                  --              fN <- readIORef viewRFalse >>= return . (! r)
+                  --              if tN == thresh && fN == thresh then return True else return False
+                  --          else if isTrue then do 
+                  --              tN <- readIORef viewRTrue >>= return . (! r)
+                  --              if tN == thresh then return True else return False
+                  --          else do
+                  --              fN <- readIORef viewRFalse >>= return . (! r)
+                  --              if fN == thresh then return True else return False
+                  ---- if some view[r] is satisfied notify the main code block
+                  --if result then writeChan viewReady () else ?pass
+                else ?pass --return ()
+            CoinCastF2P_OK -> do
+            --CastF2P_OK -> do
+                -- Deliver the OK message back from fMulticast when bcasting
+                -- to either the sbcast or the main body
+                if sstring == "sbcast" then do
+                    -- EDIT: only one channel now
+                    --_toOK <- getOKChan s _round _bit f2sbOKChans
+                    --writeChan _toOK ()
+                    gprint ("Received some OK message...") _round
+                    writeChan f2sbOKChan ()
+                else do
+                    print ("OK for main thread (AUX)") _round
+                    writeChan f2mainOK ()
+            _ -> 
+                writeChan viewReady ()
+        --else ?pass
+
+    ---- Create the channels for the sBroadcast to use
+    ---- One channel for p2f --> sbcast, one for p2f OK --> sbcast, and sbcast --> main
+    --let newSBcastChan _round _bit _f2sb _f2sbok = do --_sb2main = do
+    --            _S <- newChan
+    --            --_OK <- newChan
+    --            _toMain <- newChan
+    --            modifyIORef _f2sb $ Map.insert (_round, _bit) _S
+    --            --modifyIORef _f2sbok $ Map.insert (_round, _bit) _OK
+    --            return (_S, _OK)
+    --            --exists <- readIORef _sb2main >>= return . (member _round)
+    --            --if exists then do
+    --            --    ch <- readIORef _sb2main >>= return . (! _round)
+    --            --    return (_S, _OK, ch)
+    --            --else do
+    --            --    modifyIORef _sb2main $ Map.insert _round _toMain
+    --            --    return (_S,_OK, _toMain)
 
     -- function to deploy a new instance of sBroadcast with round r and bit b
+    {- EDIT: each SBCast uses the same sb2MainChan across different rounds. This isn't a problem
+             if we stop relaying messages to old rounds. (( TODO:  read loop up there needs to 
+             know what round it is )). binptr is reset by the SBCast process so nothing to do
+             there.     
+    -}
     let newSBCast r b shouldBroadcast = do
-            (f2sb, f2sbok, sb2main) <- newSBcastChan r b f2sbChans f2sbOKChans sb2mainChans
+            --(f2sb, f2sbok) <- newSBcastChan r b f2sbChans f2sbOKChans 
+            --(f2sb, f2sbok, sb2main) <- newSBcastChan r b f2sbChans f2sbOKChans sb2mainChans
             --sBroadcast tokens totSent t pid parties r b f2sb p2f f2sbok sb2main binptr shouldBroadcast ?pass
-            sBroadcastBreak bcastVariant svalVariant tokens totSent t pid parties r b f2sb p2f f2sbok sb2main binptr shouldBroadcast ?pass
+            -- EDIT: change this to give ONE channel sb2MainChan
+            -- EDIT: must create a new f2sbChan because the old one is also listening
+            newf2sbChan :: Chan (PID, (CoinCastF2P ABACast)) <- newChan
+            oldTChan <- readIORef f2sbChanT
+            -- EDIT here we set bin_ptr to False manually, NOT sbcast
+            if b then do
+              gprint ("replacing T chan") r
+              oldTid <- readIORef sbTid
+              killThread oldTid
+              writeIORef f2sbChanT newf2sbChan
+              writeIORef binPtrT False 
+            else do
+              gprint ("replacing F chan") r
+              oldFid <- readIORef sbFid
+              killThread oldFid
+              writeIORef f2sbChanF newf2sbChan
+              writeIORef binPtrF False
+
+            theChannelToGive <- if b then readIORef f2sbChanT else readIORef f2sbChanF
+
+            tid <- sBroadcastBreak bcastVariant svalVariant tokens t pid parties r b theChannelToGive p2f f2sbOKChan (if b then sb2MainChanT else sb2MainChanF) (if b then binPtrT else binPtrF) shouldBroadcast ?pass
             -- wait for the sBCast to do spawn and do its thing then return control back to main body
-            s2MainChan <- readIORef sb2mainChans >>= return . (! r) 
-            readChan s2MainChan
-    
-    round <- newIORef 0
+            --s2MainChan <- readIORef sb2mainChans >>= return . (! r) 
+            --readChan s2MainChan
+            -- EDIT: get OK from SB
+            --readChan sb2MainChan
+            if b then do
+              writeIORef sbTid tid
+            else do
+              writeIORef sbFid tid
    
     -- Get a common coin from the random oracle 
     let commonCoinR r = do
@@ -532,13 +649,100 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
       readChan z2p  
       ?pass
 
+    -- this process is just always reading sb2MainChanT
+    binPtrWaiting <- newChan
+    fork $ forever $ do
+      () <- readChan sb2MainChanT
+      r <- readIORef round
+      mprint ("got sb2MainChanT") r
+      bpT <- readIORef binPtrT
+      bpF <- readIORef binPtrF
+      if bpT then error "binptr[T] = 1 but activated again"
+      else if bpF then do
+        mprint ("bpF already true, move on") r
+        ?pass
+        writeIORef binPtrT True
+      else do 
+        writeIORef binPtrT True
+        writeChan binPtrWaiting True
+
+    fork $ forever $ do
+      () <- readChan sb2MainChanF 
+      r <- readIORef round
+      mprint ("got sb2MainChanF") r
+      bpT <- readIORef binPtrT
+      bpF <- readIORef binPtrF
+      if bpF then error "binptr[F] = 1 but activated again"
+      else if bpT then do
+        mprint ("bpT already true, move on") r
+        ?pass
+        writeIORef binPtrF True
+      else do
+        writeIORef binPtrF True
+        writeChan binPtrWaiting False
+
+    nMinusTAux <- newIORef False
+    fork $ forever $ do
+      -- this means n-t has been received
+      () <- readChan nMinusTChan
+      bpT <- readIORef binPtrT
+      bpF <- readIORef binPtrF
+      if bpT || bpF then do
+        -- they are waiting for viewReady so
+        writeIORef nMinusTAux True
+        writeChan viewReady ()
+      else do -- they still waiting on binPtr just set the flag and pass
+        writeIORef nMinusTAux True
+        ?pass
+
+    -- if b0 or b1 is set give it back else wait for an sb instance
+    --let waitForBinPtr r = do
+    --              --print ("reading IORef") r
+    --              b0 <- readIORef binPtrT
+    --              --print ("able to read True: " ++ show b0) r
+    --              b1 <- readIORef binPtrF
+    --              --print ("able to read False: " ++ show b1) r
+    --              if b0 then do
+    --                print ("returning binPtr True") r
+    --                return True
+    --              else if b1 then do
+    --                print ("returning binPtr False") r
+    --                return False
+    --              else do
+    --                print ("&&&&&& actually waiting for the channel") r
+    --                () <- readChan sb2MainChan
+    --                gprint ("\t\t\t read sb2MainChan") r
+    --                waitForBinPtr r
+    --                    
+    --let waitForBinPtrAndPass r = do
+    --              print ("(and pass) reading IORef") r
+    --              b0 <- readIORef binPtrT
+    --              print ("(and pass) able to read True: " ++ show b0) r
+    --              b1 <- readIORef binPtrF
+    --              print ("(and pass) able to read False: " ++ show b1) r
+    --              if b0 then do
+    --                print ("(and pass) returning binPtr True") r
+    --                return True
+    --              else if b1 then do
+    --                print ("(and pass) returning binPtr False") r
+    --                return False
+    --              else do
+    --                print ("(and pass) actually waiting for the channel") r
+    --                ?pass
+    --                () <- readChan sb2MainChan
+    --                gprint ("(and pass) \t\t\t read sb2MainChan") r
+    --                waitForBinPtrAndPass r
+
     modifyIORef tokens $ (+) tks
     case msg of
             ClockP2F_Pass -> error "shouldn't be passing anything"
             ClockP2F_Through v -> do
                 r <- readIORef round
-                s <- return (not v)
-                supportCoin <- (return False)
+                -- EDIT
+                tryBit <- newIORef (not v)
+                s <- readIORef tryBit
+                --s <- return (not v)
+                --supportCoin <- (return False)
                 supportCoin <- newIORef False
 {- [TOKEN]: this bCast doesn't broadcast immediately, only the 1 if the condition is triggered 
     becuase shouldBroadcast = False -}
@@ -546,19 +750,32 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                 newSBCast 1 s False 
 
                 fork $ forever $ do
-                    isDecided <- readIORef decided
-                    --if not isDecided then do
                     modifyIORef round $ (+) 1
+                    -- read what the current bit is from the last round
+                    -- and supportCoin
+                    s <- readIORef tryBit
+                    sc <- readIORef supportCoin
                     r <- readIORef round
+                    liftIO $ putStrLn $ "\n[" ++ show pid ++ "] new round " ++ show r ++ "\n"
+                    print ("supportCoin: " ++ show sc) r
+                    b0 <- readIORef binPtrF
+                    b1 <- readIORef binPtrT
+                    print ("binptr[T]: " ++ show b1 ++ ", binptr[F]: " ++ show b0) r
+
+                    -- isDecided is used ONLY to write output to Z
+                    isDecided <- readIORef decided
 
                     -- no s_value in this round yet
-                    modifyIORef roundSValue $ Map.insert r False 
-                    liftIO $ putStrLn $ "\n[" ++ show pid ++ "] new round " ++ show r ++ "\n"
+                    --modifyIORef roundSValue $ Map.insert r False 
 
 {- [Token]: triggerssibly two broacasts so 2n max? -}
-                    sc <- readIORef supportCoin
                     --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] supportCoin " ++ show sc
                     newSBCast r (not s) (not sc)
+                    b0 <- readIORef binPtrF
+                    b1 <- readIORef binPtrT
+                    print ("(after bcast) binptr[T]: " ++ show b1 ++ ", binptr[F]: " ++ show b0) r
+
+                    -- EDIT: by now bin_ptr is correctly set to False if supportCoin
                     -- for the first check, it is okay to give them the same channel
                     -- because one of them will aways be True first and that's all we are about
                     -- later on though, we may encounter another message on this channel
@@ -571,48 +788,74 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
 -- or ?passing if neither applies
                     first <- readIORef firstIteration
                     firstDec <- readIORef firstDecide
-                    if first then do
+                    whichBinPtr <- if first then do
                       liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] Oking\n"
                       writeChan p2z (ABAF2P_Ok, SendTokens 0)
                       modifyIORef firstIteration $ not
-                    else if isDecided && firstDec then do
-                      liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] Deciding\n"
-                      dec <- readIORef decision
-                      writeChan p2z ((ABAF2P_Out dec), SendTokens 0)
-                      modifyIORef firstDecide $ not
+                      --waitForBinPtr r
+                      -- EDIT: new way (assumed both false
+                      if b0 || b1 then error "first round should be both false"
+                      else return ()
+                      readChan binPtrWaiting
+                    --else if isDecided && firstDec then do
+                    --  liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] Deciding\n"
+                    --  dec <- readIORef decision
+                    --  writeChan p2z ((ABAF2P_Out dec), SendTokens 0)
+                    --  modifyIORef firstDecide $ not
                     else do
-                      liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] passing\n"
-                      ?pass 
+                      -- EDIT: pass first here
+                      --return ()
+                      --EDIT newway
+                      --waitForBinPtrAndPass r
+                      if b0 then
+                        -- juts go ahead
+                        return False
+                      else if b1 then return True
+                      else do 
+                        -- wait for channel but pass first
+                        ?pass
+                        readChan binPtrWaiting  
+                        
+                      --liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] passing\n"
+                      -- ?pass 
 
-                    s2MainChan <- readIORef sb2mainChans >>= return . (! r) 
-                    () <- readChan s2MainChan
-                    modifyIORef roundSValue $ Map.insert r True
-                    liftIO $ putStrLn $ "finished s2MainChan"
+                    -- EDIT: blocks until a bin_ptr is True
+                    --print ("waiting for some bin ptr in round " ++ show r) r
+                    --whichBinPtr <- waitForBinPtr r
+                    --print ("**********") r
+                    --s2MainChan <- readIORef sb2mainChans >>= return . (! r) 
+                    --() <- readChan s2MainChan
+                    ----modifyIORef roundSValue $ Map.insert r True
+                    --liftIO $ putStrLn $ "finished s2MainChan"
 
-                    -- check which bin_ptr[bit] is True
-                    b0 <- readIORef binptr >>= return . (! False)
-                    b1 <- readIORef binptr >>= return . (! True)
-                    
-                    liftIO $ putStrLn $ "[" ++ show ?pid ++ "] b0: " ++ show b0 ++ ", b1: " ++ show b1
-                    
+                    ---- check which bin_ptr[bit] is True
+                    --b0 <- readIORef binptr >>= return . (! False)
+                    --b1 <- readIORef binptr >>= return . (! True)
+                    --
+                    --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] b0: " ++ show b0 ++ ", b1: " ++ show b1
+                    b0 <- readIORef binPtrF
+                    b1 <- readIORef binPtrT 
                     if b0 && b1 then error $ "[" ++ show ?pid ++ ", " ++ show r ++ "] has both true whic shouldn't happen"
                     else return ()
 
                     -- set w for broadcast
                     sc <- readIORef supportCoin
                     randomChoice <- ?getBit
-                    let w = if randomChoice then
-                              if sc
-                              then s
-                              else if b0
-                              then False
-                              else True 
-                            else
-                              if sc
-                              then s
-                              else if b1
-                              then True
-                              else False
+                    -- EDIT
+                    let w = if sc then s
+                            else whichBinPtr
+                    --let w = if randomChoice then
+                    --          if sc
+                    --          then s
+                    --          else if b0
+                    --          then False
+                    --          else True 
+                    --        else
+                    --          if sc
+                    --          then s
+                    --          else if b1
+                    --          then True
+                    --          else False
    
                     let sidMain :: SID = (show ("maincast", pid, r, w), show (pid, parties, ""))
 {- [Token] another bcast of N -}
@@ -620,11 +863,27 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                     --readChan f2mainOK
                     gprint "main multicasting" r
                     multicast sidMain (AUX r w, DeliverTokensWithMessage 0)
-                    ?pass                   -- WRITE
+                    -- ?pass                   -- WRITE
+  
+                    if isDecided && firstDec then do
+                      liftIO $ putStrLn $ "\n[" ++ show ?pid ++ "] Deciding\n"
+                      dec <- readIORef decision
+                      writeChan p2z ((ABAF2P_Out dec), SendTokens 0)
+                      modifyIORef firstDecide $ not
+                    else ?pass
+
+              -- ===================================================================
 
                     -- wait for view[r]
-                    readChan viewReady      -- READ
-                    gprint "got viewReady" r
+                    --readChan viewReady      -- READ
+                    -- EDIT: naux might have been satisfied while waiting above
+                    --       if reached here and true, we can move on to the coin
+                    --       otherwise wait for the process 
+                    naux <- readIORef nMinusTAux
+                    if naux then return ()
+                    else readChan viewReady
+                    gprint "******got viewReady" r
+                    writeIORef nMinusTAux False
 
                     -- get strong common coin
                     --liftIO $ putStrLn $ "main common coin"
@@ -632,37 +891,60 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                     case bres of
                       Just b -> do
                         gprint ("Common coin: " ++ show b) r 
-                        
-                        -- decide?
-                        t <- readIORef viewRTrue >>= return . (member r)
-                        f <- readIORef viewRFalse >>= return . (member r)
+
+                        -- EDIT: this coin flip becomes the next s_i
+                        writeIORef tryBit b
+
+                        ---- decide?
+                        --t <- readIORef viewRTrue >>= return . (member r)
+                        --f <- readIORef viewRFalse >>= return . (member r)
                         --gprint ("\t\t t: " ++ show t ++ " f: " ++ show f) r
                         --supportCoin <- if t && f then do
-                        writeIORef supportCoin =<< if t && f then do
-                                           return True
-                                       else if t || f then do 
-                                           if t then do
-                                               liftIO $ putStrLn $ "[" ++ show ?pid ++ "] deciding True"
-                                               if not isDecided then do
-                                                 modifyIORef decided $ not
-                                                 writeIORef decision True
-                                                 --writeChan p2z ((ABAF2P_Out True), SendTokens 0)
-                                               else return ()
-                                           else do
-                                               liftIO $ putStrLn $ "[" ++ show ?pid ++ "] deciding False"
-                                               if not isDecided then do
-                                                 --writeChan p2z ((ABAF2P_Out False), SendTokens 0)
-                                                 modifyIORef decided $ not
-                                                 writeIORef decision False
-                                               else return ()
-                                           return True
-                                       else do  
-                                           return False
+
+                        b0 <- readIORef binPtrT
+                        b1 <- readIORef binPtrF
+                        -- EDIT: we know something is done, now determine support_coin
+                        writeIORef supportCoin =<< if b0 && b1 then return True
+                                                   else if b0 && (b0 == b) then do
+                                                     -- decide False
+                                                     writeIORef decided True
+                                                     writeIORef decision b
+                                                     return True
+                                                  else if b1 && (b1 == b) then do
+                                                     -- decide True
+                                                     writeIORef decided True
+                                                     writeIORef decision b
+                                                     return True
+                                                  else do
+                                                    dd <- readIORef decided
+                                                    if dd then error ("[" ++ show ?pid ++ "] shouldn't get here if already decided")
+                                                    else return False
+
+                        --writeIORef supportCoin =<< if t && f then do
+                        --                   return True
+                        --               else if t || f then do 
+                        --                   if t then do
+                        --                       liftIO $ putStrLn $ "[" ++ show ?pid ++ "] deciding True"
+                        --                       if not isDecided then do
+                        --                         modifyIORef decided $ not
+                        --                         writeIORef decision True
+                        --                         --writeChan p2z ((ABAF2P_Out True), SendTokens 0)
+                        --                       else return ()
+                        --                   else do
+                        --                       liftIO $ putStrLn $ "[" ++ show ?pid ++ "] deciding False"
+                        --                       if not isDecided then do
+                        --                         --writeChan p2z ((ABAF2P_Out False), SendTokens 0)
+                        --                         modifyIORef decided $ not
+                        --                         writeIORef decision False
+                        --                       else return ()
+                        --                   return True
+                        --               else do  
+                        --                   return False
                         --sc <- readIORef supportCoin
                         --liftIO $ putStrLn $ "[" ++ show ?pid ++ "] sc: " ++ show sc
                         -- set the binptr values back to False for the next round
-                        modifyIORef binptr $ Map.insert True False
-                        modifyIORef binptr $ Map.insert False False
+                        --modifyIORef binptr $ Map.insert True False
+                        --modifyIORef binptr $ Map.insert False False
                         return ()
                       Nothing -> return ()
                     --else do
@@ -679,7 +961,10 @@ type ABATranscript = [Either
                             (SID, CoinCastF2A)))
                         (PID, (ABAF2P, CarryTokens Int))]
 
-
+{- All parties are true. It only delivers messages for the first round so either:
+    1. the coin flip = True and all decide 
+    2. the coin flip = False and they all attempt True again
+-}
 testEnvABAHonestAllTrue 
     :: (MonadEnvironment m) =>
     Environment (ABAF2P, CarryTokens Int) (ClockP2F Bool, CarryTokens Int)
@@ -687,7 +972,6 @@ testEnvABAHonestAllTrue
                      (Either (ClockF2A (SID, ((ABACast, TransferTokens Int), CarryTokens Int)))
                              (SID, CoinCastF2A)))
         ((SttCruptZ2A (ClockP2F (SID, (CoinCastP2F ABACast, CarryTokens Int)))
-                      --(Either ClockA2F (SID, (CoinCastA2F ABACast, CarryTokens Int)))), CarryTokens Int) Void
                       (Either ClockA2F (SID, (CoinCastA2F ABACast, TransferTokens Int)))), CarryTokens Int) Void
         (ClockZ2F) ABATranscript m
 testEnvABAHonestAllTrue z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
@@ -754,6 +1038,7 @@ testEnvABAHonestAllTrue z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
     writeChan outp tr
 
 testABAHonestAllTrue = runITMinIO 120 $ execUC testEnvABAHonestAllTrue (runAsyncP protABA) (runAsyncF $ bangFAsync $ fMulticastAndCoinToken) dummyAdversaryToken
+
 
 testEnvABAOneCruptOneRound z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
     let parties = ["Alice", "Bob", "Charlie", "Mary"]

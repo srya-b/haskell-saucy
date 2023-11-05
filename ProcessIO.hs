@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types, ImplicitParams, ConstraintKinds
+{-# LANGUAGE Rank2Types, ImplicitParams, ConstraintKinds, ScopedTypeVariables
   #-} 
 
 {- Haskell-SaUCy Process Model
@@ -510,6 +510,30 @@ testMove = runITMinIO 120 $ do
   c1 <- newChan
   writeChan a ()
   readChan b
+
+{- channels in IORefs -}
+data AType = AType_F2P Bool | AType_P2F Int deriving (Show, Eq)
+waitOnRef iochan ret = do
+  fork $ forever $ do
+    ch <- readIORef  iochan
+    m <- readChan ch
+    liftIO $ putStrLn $ "waiter: " ++ show m
+    writeChan ret ()
+  return ()
+
+createIORef = runITMinIO 120 $ do
+  origCh :: Chan AType <- newChan
+  ret <- newChan
+  chRef <- newIORef origCh
+  waitOnRef chRef ret
+  -- should work no problem
+  ch <- readIORef chRef
+  liftIO $ putStrLn $ "Write to chan in ref..."
+  writeChan ch $ AType_F2P True
+  () <- readChan ret
+  liftIO $ putStrLn $ "\nWrite to origin chan..."
+  writeChan origCh $ AType_P2F 10
+  readChan ret
 
 {--- Counter examples.
    Why are the ILC rules defined the way they are?

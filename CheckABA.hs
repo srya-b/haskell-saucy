@@ -133,7 +133,8 @@ performABAEnv abaConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump out
     envExecCmd z2p z2a z2f clockChan pump cmd envExecABACmd
   writeChan outp =<< readIORef transcript
 
-testUEnvABATest
+{- This environment is a simple check that the protocol works. It will always deliver all messages in a round and randomly choose honest party values -}
+testEnvABADeliverAll
     :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
     Environment (ABAF2P, CarryTokens Int) (ClockP2F Bool, CarryTokens Int)
         (SttCruptA2Z (SID, ((CoinCastF2P ABACast), CarryTokens Int))
@@ -143,7 +144,7 @@ testUEnvABATest
                       --(Either ClockA2F (SID, (CoinCastA2F ABACast, CarryTokens Int)))), CarryTokens Int) Void
                       (Either ClockA2F (SID, (CoinCastA2F ABACast, TransferTokens Int)))), CarryTokens Int) Void
         (ClockZ2F) (ABAConfig, [Either ABAInput AsyncInput], ABATranscript) m
-testUEnvABATest parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+testEnvABADeliverAll parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --let parties = ["Alice", "Bob", "Charlie", "Mary"]
   --let sid = ("sidTestEnvMulticastCoin", show (parties, 1, ""))
   --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Bob",())]
@@ -156,11 +157,16 @@ testUEnvABATest parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f)
   let sid = (sssid, show (parties, t, ""))
  
   let cruptMapList = map (\x -> (x,())) crupts 
-  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList $ cruptMapList ++  [("-1", ())])
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList $ cruptMapList)
  
   cmdList <- newIORef []  
-  
+
+  let valueFilter msg = case msg of
+                          EST r b -> (1,r,b)
+                          AUX r b -> (2,r,b)
+ 
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceiver, getByFilter) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
 
   () <- readChan pump
   modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
@@ -180,11 +186,10 @@ testUEnvABATest parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f)
 
   let inputTokens = 10000
   -- Give somehonest parties some inputs
-  -- choose input values for the honest parties
-  -- should create 6 One messages each 
   forMseq_ honest $ \h -> do
     -- choose a boolean
-    x <- liftIO $ generate chooseAny
+    --x <- liftIO $ generate chooseAny
+    let x = True
     modifyIORef cmdList $ (++ [Left $ (CmdABAP2F h x, inputTokens)])
     writeChan z2p $ (h, ((ClockP2F_Through $ x), SendTokens inputTokens))
     readChan pump
@@ -194,36 +199,50 @@ testUEnvABATest parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f)
     modifyIORef cmdList $ (++ [Right (CmdGetCount, 0)])
     c <- envQueueSize z2a clockChan 0
 
+    inps <- newIORef []
     forMseq_ crupts $ \cpid -> do
-      inps <- liftIO $ generate $ abaGeneratorOnlyMsgs (max 10 c) c (makeMainSid parties cpid r) (makeSBCastSid parties cpid r) parties inputs r 64
+      cinps <- liftIO $ generate $ abaGeneratorOnlyMsgs (max 10 c) c (makeMainSid parties cpid r) (makeSBCastSid parties cpid r) parties inputs r 64
+      modifyIORef inps (++ map Left cinps)
+  
+      --forMseq_ inps $ \i -> do
+      --  --modifyIORef debugLog $ (++ [Left i])
+      --  modifyIORef cmdList $ (++ [Left i])
+      --  envExecABACmd z2p z2a pump i
 
-      forMseq_ inps $ \i -> do
-        --modifyIORef debugLog $ (++ [Left i])
-        modifyIORef cmdList $ (++ [Left i])
-        envExecABACmd z2p z2a pump i
-
-      inps <- liftIO $ generate $ rqDeliverList c
-      forMseq_ inps $ \inp -> do
-        modifyIORef cmdList $ (++ [Right (inp,0)])
-        envExecAsyncCmd z2p z2a z2f clockChan pump (inp,0)
+    dinps <- liftIO $ generate $ rqDeliverAll c
+    modifyIORef inps (++ map (\x -> Right (x,0)) dinps)
+    --forMseq_ inps $ \inp -> do
+    --  modifyIORef cmdList $ (++ [Right (inp,0)])
+    --  envExecAsyncCmd z2p z2a z2f clockChan pump (inp,0)
+    --execInps <- readIORef inps >>= (liftIO . generate . shuffle)
+    execInps <- readIORef inps
+    --forMseq_ execInps $ \i -> do
+    forMseq_ [0..(c-1)] $ \i -> do
+      envExecCmd z2p z2a z2f clockChan pump (Right (CmdDeliver i, 0)) envExecABACmd
 
   tr <- readIORef transcript  
   cl <- readIORef cmdList
   
   writeChan outp ((sid, parties, Map.fromList $ cruptMapList ++ [("-1",())], t), cl, tr)
 
-prop_uABATest = monadicIO $ do
+prop_ABADeliverAll = monadicIO $ do
   let prot () = protABA
-  let parties = ["Alice", "Bob", "Charlie", "Mary"] :: [PID]
+  let parties = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"] :: [PID]
   let crupts = ["Bob"]
   (config', c', t') <- run $ runITMinIO 120 $ execUC
-    (testUEnvABATest parties crupts 10000)
+    (testEnvABADeliverAll parties crupts 10000)
     (runAsyncP $ prot ())
     (runAsyncF $ bangFAsync fMulticastAndCoinToken)
     dummyAdversaryToken
   outputs <- newIORef Set.empty
-  forMseq_ [0..(length t')-1] $ \i -> do
-    case (t' !! i) of
+  --forMseq_ [0..(length t')-1] $ \i -> do
+  --  case (t' !! i) of
+  --    Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
+  --      modifyIORef outputs $ Set.insert b
+  --    Right _ -> return ()
+  --    Left _ -> return ()
+  forMseq_ t' $ \outp -> do
+    case outp of
       Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
         modifyIORef outputs $ Set.insert b
       Right _ -> return ()
@@ -235,9 +254,6 @@ prop_uABATest = monadicIO $ do
 
   printYellow ("[Config]\n\n" ++ show config')
   printYellow ("[Inputs]\n\n" ++ show c')
-
-  --assert ( (Set.size o) == 0)
-
 
 testUEnvABACompletion
     :: (MonadEnvironment m) => [PID] -> [PID] -> Int -> Int ->
@@ -455,6 +471,7 @@ prop_uABACompletion abaVariant bcastVariant svalVariant = monadicIO $ do
     printYellow ("[Config]\n\n" ++ show config')
     printYellow ("[Inputs]\n\n" ++ show c')
 
+{- A Safety checker that accepts thresholds to change in the protocol. -}
 prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
   liftIO $ putStrLn $ "\n==========================================================\n"
   let prot () = protABABreak abaVariant bcastVariant svalVariant 
@@ -489,5 +506,6 @@ prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
   printYellow ("[Config]\n\n" ++ show config')
   printYellow ("[Inputs]\n\n" ++ show c')
 
+{- different threshold setting (only 2 or 3^3=27 -}
 prop_uABASafetyCCC = prop_uABASafety ABACorrect SBcastCorrect SBSCorrect
 prop_uABASafetySSS = prop_uABASafety ABASmall SBcastSmall SBSSmall
