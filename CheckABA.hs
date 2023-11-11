@@ -46,7 +46,6 @@ makeMainSid ps p r w = (show ("maincast", p, r, w), show (p, ps, ""))
 
   the loop only care about the pidS already a part of fMulticastTOken
 -}
-
 abaGenerator :: Int -> Int -> (Bool -> SID) -> (Bool -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [Either ABAInput AsyncInput]
 abaGenerator n numQueue mainssid sbssid parties inputs round dts = frequency $
   [ (1, return []), 
@@ -64,24 +63,25 @@ abaGenerator n numQueue mainssid sbssid parties inputs round dts = frequency $
     (5, if n==0 then return [] else (:) <$> return (Left (CmdCoin (show ("sRO", round), show ("-1", parties,"")) round, 1)) <*> (abaGenerator (n-1) numQueue mainssid sbssid parties inputs round dts))
   ]
 
-abaGeneratorOnlyMsgs :: Int -> Int -> (Bool -> SID) -> (Bool -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [ABAInput]
-abaGeneratorOnlyMsgs n numQueue mainssid sbssid parties inputs round dts = frequency $
+{- This generator only generates corrupt party messages, no Deliver or
+MakeProgress messages like above. It generates at most `n` messages, with sid
+`mainssid` for AUX messages and `sbssid` for EST messages. Every message
+chooses a random PID out of `parties` and gives one of `inputs` for the
+`round`. Finally it sends `dts` tokens. -}
+abaGeneratorOnlyMsgs :: Int -> (Bool -> SID) -> (Bool -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [ABAInput]
+abaGeneratorOnlyMsgs n mainssid sbssid parties inputs round dts = frequency $
   [ (1, return []), 
-    (5, if n==0 then return [] else (:) <$> (abaEstMsg sbssid parties inputs round dts) <*> (abaGeneratorOnlyMsgs (n-1) numQueue mainssid sbssid parties inputs round dts)),
-        --((shuffle parties) >>=
-        --  (\pl -> oneof inputs >>=
-        --    \i -> return (CmdEst (sbssid i) (pl !! 0) round i dts, 0))) <*> (abaGeneratorOnlyMsgs (n-1) numQueue mainssid sbssid parties inputs round dts)),
-    (5, if n==0 then return [] else (:) <$> (abaAuxMsg mainssid parties inputs round dts) <*> (abaGeneratorOnlyMsgs (n-1) numQueue mainssid sbssid parties inputs round dts)),
-        --((shuffle parties) >>= 
-        --  (\pl -> oneof inputs >>= 
-        --    (\i -> return (CmdAux (mainssid i) (pl !! 0) round i dts, 0)))) <*> (abaGeneratorOnlyMsgs (n-1) numQueue mainssid sbssid parties inputs round dts)),
-    (5, if n==0 then return [] else (:) <$> return (CmdCoin (show ("sRO", round), show ("-1", parties,"")) round, 0) <*> (abaGeneratorOnlyMsgs (n-1) numQueue mainssid sbssid parties inputs round dts))
+    (5, if n==0 then return [] else (:) <$> (abaEstMsg sbssid parties inputs round dts) <*> (abaGeneratorOnlyMsgs (n-1) mainssid sbssid parties inputs round dts)),
+    (5, if n==0 then return [] else (:) <$> (abaAuxMsg mainssid parties inputs round dts) <*> (abaGeneratorOnlyMsgs (n-1) mainssid sbssid parties inputs round dts)),
+    (5, if n==0 then return [] else (:) <$> return (CmdCoin (show ("sRO", round), show ("-1", parties,"")) round, 0) <*> (abaGeneratorOnlyMsgs (n-1) mainssid sbssid parties inputs round dts))
   ]
 
+{- Generate a single EST message (see above for params) -}
 abaEstMsg :: (Bool -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen ABAInput
 abaEstMsg sbssid parties inputs round dts = do
   shuffle parties >>= \pl -> oneof inputs >>= \i -> return (CmdEst (sbssid i) (pl !! 0) round i dts, 0) 
 
+{- Genrate a single AUX messages (previous comment for params -}
 abaAuxMsg :: (Bool -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen ABAInput
 abaAuxMsg mainssid parties inputs round dts = do
   shuffle parties >>= \pl -> oneof inputs >>= \i -> return (CmdAux (mainssid i) (pl !! 0) round i dts, 0)
@@ -141,17 +141,11 @@ testEnvABADeliverAll
                      (Either (ClockF2A (SID, ((ABACast, TransferTokens Int), CarryTokens Int)))
                              (SID, CoinCastF2A)))
         ((SttCruptZ2A (ClockP2F (SID, (CoinCastP2F ABACast, CarryTokens Int)))
-                      --(Either ClockA2F (SID, (CoinCastA2F ABACast, CarryTokens Int)))), CarryTokens Int) Void
                       (Either ClockA2F (SID, (CoinCastA2F ABACast, TransferTokens Int)))), CarryTokens Int) Void
         (ClockZ2F) (ABAConfig, [Either ABAInput AsyncInput], ABATranscript) m
 testEnvABADeliverAll parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
-  --let parties = ["Alice", "Bob", "Charlie", "Mary"]
-  --let sid = ("sidTestEnvMulticastCoin", show (parties, 1, ""))
-  --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Bob",())]
   
-  --let parties = ["Alice", "Bob", "Charlie", "Mary"] :: [PID]
   let t = 1 :: Int
-  --let crupt = "Bob" :: PID
   let honest = parties \\ crupts
   let sssid = "sidTestEnvMulticastCoin"
   let sid = (sssid, show (parties, t, ""))
@@ -166,7 +160,7 @@ testEnvABADeliverAll parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z,
                           AUX r b -> (2,r,b)
  
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
-  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceiver, getByFilter) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
 
   () <- readChan pump
   modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
@@ -175,21 +169,11 @@ testEnvABADeliverAll parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z,
   let inputs = do [return True, return False]
   let inputTokens = importAmt
  
-  --let checkQueue n = do
-  --      --modifyIORef debugLog $ (++ [Left (Right (CmdGetCount, 0))])
-  --      modifyIORef cmdList $ (++ [Right (CmdGetCount, 0)])
-  --      writeChan z2a $ (SttCruptZ2A_A2F (Left ClockA2F_GetCount), SendTokens 0)
-  --      
-  --      c <- readChan clockChan
-  --      liftIO $ putStrLn $ "Z[testEnvACastIdeal]: Events remaining: " ++ show c
-  --      return (c > 0)
-
   let inputTokens = 10000
   -- Give somehonest parties some inputs
   forMseq_ honest $ \h -> do
     -- choose a boolean
-    --x <- liftIO $ generate chooseAny
-    let x = True
+    x <- liftIO $ generate chooseAny
     modifyIORef cmdList $ (++ [Left $ (CmdABAP2F h x, inputTokens)])
     writeChan z2p $ (h, ((ClockP2F_Through $ x), SendTokens inputTokens))
     readChan pump
@@ -201,24 +185,14 @@ testEnvABADeliverAll parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z,
 
     inps <- newIORef []
     forMseq_ crupts $ \cpid -> do
-      cinps <- liftIO $ generate $ abaGeneratorOnlyMsgs (max 10 c) c (makeMainSid parties cpid r) (makeSBCastSid parties cpid r) parties inputs r 64
+      cinps <- liftIO $ generate $ abaGeneratorOnlyMsgs (max 10 c) (makeMainSid parties cpid r) (makeSBCastSid parties cpid r) parties inputs r 64
       modifyIORef inps (++ map Left cinps)
   
-      --forMseq_ inps $ \i -> do
-      --  --modifyIORef debugLog $ (++ [Left i])
-      --  modifyIORef cmdList $ (++ [Left i])
-      --  envExecABACmd z2p z2a pump i
-
     dinps <- liftIO $ generate $ rqDeliverAll c
     modifyIORef inps (++ map (\x -> Right (x,0)) dinps)
-    --forMseq_ inps $ \inp -> do
-    --  modifyIORef cmdList $ (++ [Right (inp,0)])
-    --  envExecAsyncCmd z2p z2a z2f clockChan pump (inp,0)
-    --execInps <- readIORef inps >>= (liftIO . generate . shuffle)
-    execInps <- readIORef inps
-    --forMseq_ execInps $ \i -> do
-    forMseq_ [0..(c-1)] $ \i -> do
-      envExecCmd z2p z2a z2f clockChan pump (Right (CmdDeliver i, 0)) envExecABACmd
+    execInps <- readIORef inps >>= (liftIO . generate . shuffle)
+    forMseq_ execInps $ \i -> do
+      envExecCmd z2p z2a z2f clockChan pump i envExecABACmd
 
   tr <- readIORef transcript  
   cl <- readIORef cmdList
@@ -235,12 +209,6 @@ prop_ABADeliverAll = monadicIO $ do
     (runAsyncF $ bangFAsync fMulticastAndCoinToken)
     dummyAdversaryToken
   outputs <- newIORef Set.empty
-  --forMseq_ [0..(length t')-1] $ \i -> do
-  --  case (t' !! i) of
-  --    Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
-  --      modifyIORef outputs $ Set.insert b
-  --    Right _ -> return ()
-  --    Left _ -> return ()
   forMseq_ t' $ \outp -> do
     case outp of
       Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
@@ -262,7 +230,6 @@ testUEnvABACompletion
                      (Either (ClockF2A (SID, ((ABACast, TransferTokens Int), CarryTokens Int)))
                              (SID, CoinCastF2A)))
         ((SttCruptZ2A (ClockP2F (SID, (CoinCastP2F ABACast, CarryTokens Int)))
-                      --(Either ClockA2F (SID, (CoinCastA2F ABACast, CarryTokens Int)))), CarryTokens Int) Void
                       (Either ClockA2F (SID, (CoinCastA2F ABACast, TransferTokens Int)))), CarryTokens Int) Void
         (ClockZ2F) (ABAConfig, [Either ABAInput AsyncInput], ABATranscript) m
 testUEnvABACompletion parties crupts rounds importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
@@ -280,164 +247,70 @@ testUEnvABACompletion parties crupts rounds importAmt z2exec (p2z, z2p) (a2z, z2
   
   -- valueFilter :: ABACast -> (Int, Bool) 
   let valueFilter msg = case msg of
-                          AUX r b -> (r,b)
-                          EST r b -> (r,b)
+                          AUX r b -> (2,r,b)
+                          EST r b -> (1,r,b)
 
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
-  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceiver, getByFilter) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter,getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
+ 
+  let allAuxs r = do getByFilter (2,r,True) >>= \x -> getByFilter (2,r,False) >>= \y -> return (x ++ y)
+  let allEsts r = do getByFilter (1,r,True) >>= \x -> getByFilter (1,r,False) >>= \y -> return (x ++ y)
+  let auxTrue r = do getByFilter (2,r,True)
+  let auxFalse r = do getByFilter (2,r,False)
+  let estFalse r = do getByFilter (1,r,False)
+  let estTrue r = do getByFilter (1,r,True)
+  let doDelivers ds = do forMseq_ (deliverListAll ds) $ deliverer []
   
-  modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
+  let getEstByArb r = do
+            whichInp <- liftIO $ generate arbitrary
+            getByFilter (1,r,whichInp)
+  let getAuxByArb r = do
+            whichInp <- liftIO $ generate arbitrary
+            getByFilter (r,r,whichInp)
+ 
   c <- envQueueSize z2a clockChan 1000
 
-  --let inputs = do [return True, return False]
+  let inputs = do [return True, return False]
   let inputTokens = importAmt
-  -- randomly choose a subset to send only F and only T
-  pidsT <- selectPIDs honest
-  liftIO $ putStrLn $ "take: " ++ show (take 1 honest)  
-  let pidsF = honest \\ pidsT
   
-  let pidsT = ["Charlie", "Eve"]
+  ---- Randomly choose parition of True and False
+  pidsT <- selectPIDs honest
   let pidsF = honest \\ pidsT
-
-  liftIO $ putStrLn $ "\n\tpidsT: " ++ show pidsT
-  liftIO $ putStrLn $ "\n\tpidsF: " ++ show pidsF
 
   forMseq_ pidsT $ \h -> do
-    -- choose a boolean
-    --x <- liftIO $ generate arbitrary
-    modifyIORef cmdList $ (++ [Left $ (CmdABAP2F h True, inputTokens)])
     writeChan z2p $ (h, ((ClockP2F_Through True), SendTokens inputTokens))
     readChan pump
+  
   forMseq_ pidsF $ \h -> do
-    -- choose a boolean
-    modifyIORef cmdList $ (++ [Left $ (CmdABAP2F h False, inputTokens)])
     writeChan z2p $ (h, ((ClockP2F_Through False), SendTokens inputTokens))
     readChan pump
 
+  -- INIT: deliver ESTs + crupt by partition
+  c <- envQueueSize z2a clockChan 0
+  estT <- estTrue 1
+  estF <- estFalse 1
+  recvT <- getByReceivers pidsT
+  recvF <- getByReceivers pidsF
+  doDelivers $ (intersect estT recvT) ++ (intersect estF recvF)
+
+  -- similar structure for all rounds
   let rounds = 2
-  forMseq_ [1..rounds]  $ \r -> do
-    modifyIORef cmdList $ (++) [Right (CmdGetCount, 0)]
-    c <- envQueueSize z2a clockChan 0
- 
-    forMseq_ crupts $ \cpid -> do
-      inpsT <- liftIO $ generate $ vectorOf 10 $ abaEstMsg (makeSBCastSid parties cpid r) pidsT [return True] r 64
-      inpsF <- liftIO $ generate $ vectorOf 10 $ abaEstMsg (makeSBCastSid parties cpid r) pidsF [return False] r 64
-      let inps = inpsT ++ inpsF
-  
-      forMseq_ inps $ \i -> do
-        modifyIORef cmdList $ (++ [Left i])
-        envExecABACmd z2p z2a pump i
+  forMseq_ [1..rounds] $ \r -> do
+    -- give some parties more EST messages to get different views
+    partition <- selectPIDs honest
+    forMseq_ partition $ \p -> do
+      forp <- getByReceivers [p]
+      ests <- getEstByArb r
+      doDelivers (intersect ests forp)
    
-    inpsWithT <- getByFilter (r, True)   -- all the messages where someone receives T in r
-    inpsWithF <- getByFilter (r, False)  -- all the messages where someone receives F in r
-    
-    inpsRecvT <- newIORef ([] :: [Int])  -- receivers that should get only T
-    inpsRecvF <- newIORef ([] :: [Int])  -- receivers that should receive only F
-    liftIO $ putStrLn $ "inpsWithT: " ++ show inpsWithT
-    liftIO $ putStrLn $ "inpsWithF: " ++ show inpsWithF
-    _ <- getByReceiver "Alice"
-    _ <- getByReceiver "Bob"
-    forMseq_ pidsT $ \pt -> do
-      i' <- getByReceiver pt
-      modifyIORef inpsRecvT $ (++ i')
-    forMseq_ pidsF $ \pf -> do
-      i' <- getByReceiver pf
-      modifyIORef inpsRecvF $ (++ i')
-    ipt <- readIORef inpsRecvT
-    ipf <- readIORef inpsRecvF
-    liftIO $ putStrLn $ "inpsRecvT: " ++ show ipt
-    liftIO $ putStrLn $ "inpsRecvF: " ++ show ipf
-
-    -- select inputs from the set of possible indices
-    let allIdxs = (intersect ipt inpsWithT) ++ (intersect ipf inpsWithF)
-  
-    --finalInps <- liftIO $ generate $ shuffle (deliverListAll allIdxs)
-    finalInps <- (return . deliverListAll) =<< (liftIO $ generate $ shuffle allIdxs)
-  
-    -- deliver the intersection of all the indices
-    --let finalInps = finalInpsT ++ finalInpsF
-    liftIO $ putStrLn $ "***** final idxs: " ++ show finalInps
-    --forMseq_ (makeCmdDeliver finalInpsT) $ \i -> do
-    forMseq_ finalInps $ \i -> do
-      modifyIORef cmdList $ (++ [Right (i,0)])
-      deliverer [] i
-    
-    inpsWithT <- getByFilter (r, True)   -- all the messages where someone receives T in r
-    inpsWithF <- getByFilter (r, False)  -- all the messages where someone receives F in r
-    
-    inpsRecvT <- newIORef ([] :: [Int])  -- receivers that should get only T
-    inpsRecvF <- newIORef ([] :: [Int])  -- receivers that should receive only F
-    liftIO $ putStrLn $ "2 inpsWithT: " ++ show inpsWithT
-    liftIO $ putStrLn $ "2 inpsWithF: " ++ show inpsWithF
-    forMseq_ pidsT $ \pt -> do
-      i' <- getByReceiver pt
-      modifyIORef inpsRecvT $ (++ i')
-    forMseq_ pidsF $ \pf -> do
-      i' <- getByReceiver pf
-      modifyIORef inpsRecvF $ (++ i')
-    ipt <- readIORef inpsRecvT
-    ipf <- readIORef inpsRecvF
-    liftIO $ putStrLn $ "2 inpsRecvT: " ++ show ipt
-    liftIO $ putStrLn $ "2 inpsRecvF: " ++ show ipf
-
-    -- select inputs from the set of possible indices
-    let allIdxs = (intersect ipt inpsWithT) ++ (intersect ipf inpsWithF)
-    liftIO $ putStrLn $ "2 updated indices: " ++ show (deliverListAll allIdxs)
-  
-    --finalInps <- liftIO $ generate $ shuffle (deliverListAll allIdxs)
-    finalInps <- (return . deliverListAll) =<< (liftIO $ generate $ shuffle allIdxs)
-  
-    -- deliver the intersection of all the indices
-    --let finalInps = finalInpsT ++ finalInpsF
-    liftIO $ putStrLn $ "***** final idxs: " ++ show finalInps
-    --forMseq_ (makeCmdDeliver finalInpsT) $ \i -> do
-    forMseq_ finalInps $ \i -> do
-      modifyIORef cmdList $ (++ [Right (i,0)])
-      deliverer [] i
-
-    liftIO $ putStrLn $ "================= sending aux ==================="  
-  
+    -- give crupt input of arbitrary input 
     forMseq_ crupts $ \cpid -> do
-      inpsT <- liftIO $ generate $ vectorOf 10 $ abaAuxMsg (makeMainSid parties cpid r) pidsT [return True] r 64
-      inpsF <- liftIO $ generate $ vectorOf 10 $ abaAuxMsg (makeMainSid parties cpid r) pidsF [return False] r 64
-      let inps = inpsT ++ inpsF
-  
-      forMseq_ inps $ \i -> do
-        modifyIORef cmdList $ (++ [Left i])
-        envExecABACmd z2p z2a pump i
-   
-    inpsWithT <- getByFilter (r, True)   -- all the messages where someone receives T in r
-    inpsWithF <- getByFilter (r, False)  -- all the messages where someone receives F in r
-    
-    inpsRecvT <- newIORef ([] :: [Int])  -- receivers that should get only T
-    inpsRecvF <- newIORef ([] :: [Int])  -- receivers that should receive only F
-    liftIO $ putStrLn $ "2 inpsWithT: " ++ show inpsWithT
-    liftIO $ putStrLn $ "2 inpsWithF: " ++ show inpsWithF
-    forMseq_ pidsT $ \pt -> do
-      i' <- getByReceiver pt
-      modifyIORef inpsRecvT $ (++ i')
-    forMseq_ pidsF $ \pf -> do
-      i' <- getByReceiver pf
-      modifyIORef inpsRecvF $ (++ i')
-    ipt <- readIORef inpsRecvT
-    ipf <- readIORef inpsRecvF
-    liftIO $ putStrLn $ "2 inpsRecvT: " ++ show ipt
-    liftIO $ putStrLn $ "2 inpsRecvF: " ++ show ipf
+      cinp <- liftIO $ generate $ vectorOf 1 $ abaEstMsg (makeSBCastSid parties cpid r) partition inputs r 64
+      envExecABACmd z2p z2a pump (cinp !! 0)
 
-    -- select inputs from the set of possible indices
-    let allIdxs = (intersect ipt inpsWithT) ++ (intersect ipf inpsWithF)
-    liftIO $ putStrLn $ "2 updated indices: " ++ show (deliverListAll allIdxs)
-  
-    --finalInps <- liftIO $ generate $ shuffle (deliverListAll allIdxs)
-    finalInps <- (return . deliverListAll) =<< (liftIO $ generate $ shuffle allIdxs)
-  
-    -- deliver the intersection of all the indices
-    --let finalInps = finalInpsT ++ finalInpsF
-    liftIO $ putStrLn $ "***** final idxs: " ++ show finalInps
-    --forMseq_ (makeCmdDeliver finalInpsT) $ \i -> do
-    forMseq_ finalInps $ \i -> do
-      modifyIORef cmdList $ (++ [Right (i,0)])
-      deliverer [] i
+    -- give AUX to make all parties progress to the next round
+    auxs <- allAuxs r
+    doDelivers auxs
 
   tr <- readIORef transcript
   cl <- readIORef cmdList
@@ -479,7 +352,7 @@ prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
   --let t = length ps `div` 3
   let t = 1 
   let parties = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"]
-  let crupts = ["Bob"]
+  let crupts = ["Frank"]
   --crupts <- liftIO $ generate $ cruptFrom ps 1
   (config', c', t') <- run $ runITMinIO 120 $ execUC
     (testUEnvABACompletion parties crupts 100 10000)
@@ -498,7 +371,6 @@ prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
   o <- readIORef outputs
   no <- readIORef numOutputs
 
-  assert False
   pre $ (Set.size o) > 0
   pre $ no > 1
   printYellow("Checking safety...")
@@ -508,4 +380,6 @@ prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
 
 {- different threshold setting (only 2 or 3^3=27 -}
 prop_uABASafetyCCC = prop_uABASafety ABACorrect SBcastCorrect SBSCorrect
-prop_uABASafetySSS = prop_uABASafety ABASmall SBcastSmall SBSSmall
+prop_uABASafetySSS = do
+  let args = stdArgs{maxSuccess = 500}
+  quickCheckWithResult args $ prop_uABASafety ABASmall SBcastSmall SBSSmall

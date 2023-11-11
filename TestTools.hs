@@ -229,69 +229,60 @@ envMapQueue :: (MonadEnvironment m, Eq a, Show _leak, Show a) =>
   (Chan (SttCruptA2Z _f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) _f2a))) -> Chan Int -> 
   IORef (Maybe (Either (SttCruptA2Z f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) f2a)) (PID, p2z))) ->
   Chan () -> (_leak -> a) ->
-    m ( [(PID,PID)] -> AsyncCmd -> m (), 
-        [(PID,PID)] -> m (),
-        (PID,PID) -> m [Int],
-        PID -> m [Int],
-        PID -> m [Int],
-        a -> m [Int] )
+    m ( [(PID,PID)] -> AsyncCmd -> m (),  -- doDeliver
+        [(PID,PID)] -> m (),              -- deliverByPairs
+        (PID,PID) -> m [Int],             -- getByPair
+        PID -> m [Int],                   -- getBySender
+        [PID] -> m [Int],                 -- getByReceiver
+        a -> m [Int],                     -- getByFilter 
+        m [(SID, ((_leak, TransferTokens Int), CarryTokens Int))] )   -- getLeaks
 envMapQueue z2a a2z clockChan lastOut pump fil = do
   ctr <- newIORef 0
   sendPairs <- newIORef []
 
   recvVal <- newIORef []
+  allLeaks <- newIORef []
 
   -- okay by default be able to search by receiver and sender
   let handleLeak f (sid :: SID, ((m, (DeliverTokensWithMessage st)), SendTokens a)) = do
-                       let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "fMulticast" $ snd sid
-                       forMseq_ parties $ \p -> do 
-                         modifyIORef sendPairs $ (++ [(pidS, p)])
-                         --liftIO $ putStrLn $ "For message " ++ show m ++ ", appending " ++ show (p, f m) ++ " to recvVal"
-                         modifyIORef recvVal $ (++ [(p, f m)])
+            let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "fMulticast" $ snd sid
+            forMseq_ parties $ \p -> do 
+              modifyIORef sendPairs $ (++ [(pidS, p)])
+              --liftIO $ putStrLn $ "For message " ++ show m ++ ", appending " ++ show (p, f m) ++ " to recvVal"
+              modifyIORef recvVal $ (++ [(p, f m)])
 
   let alwaysCall = do
-                       -- first get the leas
-                       writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
-                       () <- readChan pump
-                       mf <- readIORef lastOut
-                       let Just (Left (SttCruptA2Z_F2A (Left (ClockF2A_Leaks leaks)))) = mf
-                       t <- readIORef ctr
-                       let tail = drop t leaks
-                       modifyIORef ctr (+ length tail)
-                       forMseq_ tail $ handleLeak fil
+            -- first get the leas
+            writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
+            () <- readChan pump
+            mf <- readIORef lastOut
+            let Just (Left (SttCruptA2Z_F2A (Left (ClockF2A_Leaks leaks)))) = mf
+            t <- readIORef ctr
+            let tail = drop t leaks
+            modifyIORef ctr (+ length tail)
+            modifyIORef allLeaks $ (++ tail)
+            forMseq_ tail $ handleLeak fil
+  
+  let getLeaks = do
+            () <- alwaysCall
+            readIORef allLeaks
+
  
   let deliverIdx idx st censorList = do
-                       () <- alwaysCall 
-                       ---- first get the leas
-                       --writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
-                       --() <- readChan pump
-                       --mf <- readIORef lastOut
-                       --let Just (Left (SttCruptA2Z_F2A (Left (ClockF2A_Leaks leaks)))) = mf
-                       --t <- readIORef ctr
-                       --let tail = drop t leaks
-                       --modifyIORef ctr (+ length tail)
-                       --forMseq_ tail $ handleLeak fil
-                       
-                       -- what is this idx
-                       toFrom <- (readIORef sendPairs >>= return . (!! idx))
-                       --liftIO $ putStrLn $ "Delivering a msg between: " ++ show toFrom
-                       --liftIO $ putStrLn $ "Censor pair: " ++ show censorList
-                       --liftIO $ putStrLn $ "and: " ++ show (map invert censorList)
-                       if (elem toFrom censorList) || (elem (invert toFrom) censorList) then do
-                         liftIO $ putStrLn $ "\n\t" ++ show toFrom ++ " is in censorList\n"
-                         writeChan pump ()
-                       else do 
-                         sp <- readIORef sendPairs
-                         liftIO $ putStrLn $ "sendPairs: " ++ show (length sp)
-                         rv <- readIORef recvVal
-                         liftIO $ putStrLn $ "recvVals: " ++ show (length rv)
-                         liftIO $ putStrLn $ "delivering idx: " ++ show idx
-                         --if (length sp) <= idx || (length rv) <= idx then error $ "idx: " ++ show idx
-                         --else return ()
-                         modifyIORef sendPairs (deleteNth idx)
-                         modifyIORef recvVal (deleteNth idx)
-                         --liftIO $ putStrLn $ "delivering idx: " ++ show idx
-                         writeChan z2a $ ((SttCruptZ2A_A2F $ Left (ClockA2F_Deliver idx)), SendTokens st)
+            () <- alwaysCall 
+            
+            -- what is this idx
+            toFrom <- (readIORef sendPairs >>= return . (!! idx))
+            if (elem toFrom censorList) || (elem (invert toFrom) censorList) then do
+              liftIO $ putStrLn $ "\n\t" ++ show toFrom ++ " is in censorList\n"
+              writeChan pump ()
+            else do 
+              sp <- readIORef sendPairs
+              rv <- readIORef recvVal
+              --liftIO $ putStrLn $ "delivering idx: " ++ show idx
+              modifyIORef sendPairs (deleteNth idx)
+              modifyIORef recvVal (deleteNth idx)
+              writeChan z2a $ ((SttCruptZ2A_A2F $ Left (ClockA2F_Deliver idx)), SendTokens st)
   let doDeliver censorList cmd = do
                case cmd of 
                  (CmdDeliver idx') -> do
@@ -326,6 +317,11 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
               let idxs = map fst $ filter (\(_,(s,r)) -> p == r) $ zip [0..] sp
               return idxs
 
+  let getByReceivers (ps :: [PID]) = do
+              ret <- newIORef []
+              forMseq_ ps $ \p -> getByReceiver p >>= modifyIORef ret . (++)
+              readIORef ret
+
   let getByFilter x = do  
               liftIO $ putStrLn $ "filtering by " ++ show x
               () <- alwaysCall
@@ -334,7 +330,7 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
               let idxs = map fst $ filter (\(idx, (p', v)) -> (v == x)) $ zip [0..] vr
               return idxs
   
-  return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceiver, getByFilter)
+  return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceivers, getByFilter, getLeaks)
 
 {-
   * a filtering function that outputs a key and a value to store for the item
