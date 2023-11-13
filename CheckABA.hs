@@ -223,7 +223,10 @@ prop_ABADeliverAll = monadicIO $ do
   printYellow ("[Config]\n\n" ++ show config')
   printYellow ("[Inputs]\n\n" ++ show c')
 
-testUEnvABACompletion
+{- This environment paritions parties on input, starts the protocol by only giving each party EST of its
+   own value, then in a loop gives some subset arbitrary EST values, and tries to force round progress by
+   giving AUX messages to all. -}
+testUEnvABAPartition
     :: (MonadEnvironment m) => [PID] -> [PID] -> Int -> Int ->
     Environment (ABAF2P, CarryTokens Int) (ClockP2F Bool, CarryTokens Int)
         (SttCruptA2Z (SID, ((CoinCastF2P ABACast), CarryTokens Int))
@@ -232,7 +235,7 @@ testUEnvABACompletion
         ((SttCruptZ2A (ClockP2F (SID, (CoinCastP2F ABACast, CarryTokens Int)))
                       (Either ClockA2F (SID, (CoinCastA2F ABACast, TransferTokens Int)))), CarryTokens Int) Void
         (ClockZ2F) (ABAConfig, [Either ABAInput AsyncInput], ABATranscript) m
-testUEnvABACompletion parties crupts rounds importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+testUEnvABAPartition parties crupts rounds importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let t = 1 :: Int
   --let crupt = "Bob" :: PID
   let honest = parties \\ crupts
@@ -319,67 +322,67 @@ testUEnvABACompletion parties crupts rounds importAmt z2exec (p2z, z2p) (a2z, z2
 
 -- This property runs the "correct" protocol and asserts that safety is achieved
 -- and that the protocol should terminate with agreement
-prop_uABACompletion abaVariant bcastVariant svalVariant = monadicIO $ do
-  let prot () = protABABreak abaVariant bcastVariant svalVariant 
-  forAllM ( suchThat (partiesBetween 6 10) nonZeroParties) $ \ps -> do
-    let t = length ps `div` 3
-    let crupts = []
-    (config', c', t') <- run $ runITMinIO 120 $ execUC
-      (testUEnvABACompletion ps crupts 100 10000)
-      (runAsyncP $ prot ())
-      (runAsyncF $ bangFAsync fMulticastAndCoinToken)
-      dummyAdversaryToken
-    outputs <- newIORef Set.empty
-    forMseq_ [0..(length t')-1] $ \i -> do
-      case (t' !! i) of
-        Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
-          modifyIORef outputs $ Set.insert b
-        Right _ -> return ()
-        Left _ -> return ()
-    o <- readIORef outputs
+--prop_uABACompletion abaVariant bcastVariant svalVariant = monadicIO $ do
+--  let prot () = protABABreak abaVariant bcastVariant svalVariant 
+--  forAllM ( suchThat (partiesBetween 6 10) nonZeroParties) $ \ps -> do
+--    let t = length ps `div` 3
+--    let crupts = []
+--    (config', c', t') <- run $ runITMinIO 120 $ execUC
+--      (testUEnvABACompletion ps crupts 100 10000)
+--      (runAsyncP $ prot ())
+--      (runAsyncF $ bangFAsync fMulticastAndCoinToken)
+--      dummyAdversaryToken
+--    outputs <- newIORef Set.empty
+--    forMseq_ [0..(length t')-1] $ \i -> do
+--      case (t' !! i) of
+--        Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
+--          modifyIORef outputs $ Set.insert b
+--        Right _ -> return ()
+--        Left _ -> return ()
+--    o <- readIORef outputs
+--
+--    pre $ (Set.size o) > 0
+--    assert $ (Set.size o) == 1
+--
+--    printYellow ("[Config]\n\n" ++ show config')
+--    printYellow ("[Inputs]\n\n" ++ show c')
 
-    pre $ (Set.size o) > 0
-    assert $ (Set.size o) == 1
+numDecided [] = 0
+numDecided (t:tr) = case t of
+                      Right (pid, (ABAF2P_Out b, SendTokens st)) -> 1 + numDecided tr
+                      _ -> numDecided tr
 
-    printYellow ("[Config]\n\n" ++ show config')
-    printYellow ("[Inputs]\n\n" ++ show c')
+countDecisions l [] = 0
+countDecisions l (t:tr) = case t of
+                            Right (pid, (ABAF2P_Out b, SendTokens st)) -> 
+                              if elem b l then countDecisions l tr
+                              else 1 + countDecisions (l ++ [b]) tr
+                            _ -> countDecisions l tr
+numDecisions tr = countDecisions [] tr
 
 {- A Safety checker that accepts thresholds to change in the protocol. -}
 prop_uABASafety abaVariant bcastVariant svalVariant = monadicIO $ do
-  liftIO $ putStrLn $ "\n==========================================================\n"
   let prot () = protABABreak abaVariant bcastVariant svalVariant 
-  --forAllM ( suchThat (partiesBetween 6 10) nonZeroParties) $ \ps -> do
-  --let t = length ps `div` 3
-  let t = 1 
-  let parties = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"]
-  let crupts = ["Frank"]
-  --crupts <- liftIO $ generate $ cruptFrom ps 1
-  (config', c', t') <- run $ runITMinIO 120 $ execUC
-    (testUEnvABACompletion parties crupts 100 10000)
-    (runAsyncP $ prot ())
-    (runAsyncF $ bangFAsync fMulticastAndCoinToken)
-    dummyAdversaryToken
-  outputs <- newIORef Set.empty
-  numOutputs <- newIORef 0
-  forMseq_ [0..(length t')-1] $ \i -> do
-    case (t' !! i) of
-      Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
-        modifyIORef outputs $ Set.insert b
-        modifyIORef numOutputs $ (+) 1
-      Right _ -> return ()
-      Left _ -> return ()
-  o <- readIORef outputs
-  no <- readIORef numOutputs
-
-  pre $ (Set.size o) > 0
-  pre $ no > 1
-  printYellow("Checking safety...")
-  assert $ (Set.size o) == 1
-  printYellow ("[Config]\n\n" ++ show config')
-  printYellow ("[Inputs]\n\n" ++ show c')
+  forAllM ( suchThat (partiesBetween 6 10) nonZeroParties) $ \ps -> do
+    let ps = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Frank", "Gina", "Harry"]
+    let t = length ps `div` 3
+    forAllM (cruptFrom ps t) $ \cc -> do
+      (config', c', t') <- run $ runITMinIO 120 $ execUC
+        (testUEnvABAPartition ps cc 100 10000)
+        (runAsyncP $ prot ())
+        (runAsyncF $ bangFAsync fMulticastAndCoinToken)
+        dummyAdversaryToken
+      printYellow("Checking safety...")
+      pre $ (numDecided t') > 1
+      printYellow ("[Config]\n\n" ++ show config')
+      printYellow ("[Inputs]\n\n" ++ show c')
+      assert $ (numDecisions t') == 1
 
 {- different threshold setting (only 2 or 3^3=27 -}
 prop_uABASafetyCCC = prop_uABASafety ABACorrect SBcastCorrect SBSCorrect
-prop_uABASafetySSS = do
-  let args = stdArgs{maxSuccess = 500}
-  quickCheckWithResult args $ prop_uABASafety ABASmall SBcastSmall SBSSmall
+
+{- These all fail safety check -}
+prop_uABASafetySSS = quickCheckWithResult stdArgs{maxSuccess = 500}  $ prop_uABASafety ABASmall SBcastSmall SBSSmall
+prop_uABASafetySSC = prop_uABASafety ABASmall SBcastSmall SBSCorrect
+prop_uABASafetyCSS = prop_uABASafety ABACorrect SBcastSmall SBSSmall
+prop_uABASafetySCC = prop_uABASafety ABASmall SBcastCorrect SBSCorrect

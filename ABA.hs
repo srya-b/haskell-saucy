@@ -231,6 +231,7 @@ sBroadcastBroken castThreshold svalThreshold tokens tThreshold pid parties round
             -- Receiving messages from other parties with TAG,S_VAL(v_i) where TAG is EST[r_i] where r_i is the round this sBroadcast is for
             CoinCastF2P_Deliver (EST r b) -> do
                 -- Only consider messages received for the same `bit` and from other parties
+                --r <- return round
                 if r == round then do
                   receivedFromPidS <- readIORef receivedESTFrom >>= return . (member from)
 
@@ -319,7 +320,9 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
 
     -- bin_ptrs hold the s_values for each bit, initially both False
     binPtrT <- newIORef False
-    binPtrF <- newIORef False
+    binPtrF <- newIORef False 
+    auxT <- newIORef False
+    auxF <- newIORef False
 
     -- Separate views that counts unique parties that have sent a TRUE aux message for each round
     viewRTrue <- newIORef (empty :: Map Int Int)
@@ -402,15 +405,17 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                 receivedFromPidS <- readIORef receivedAUXFrom >>= return . (member pidS)
                 if (not receivedFromPidS) then do
                   r' <- readIORef round
+                  --r' <- return r
                   if r == r' then do
                     modifyIORef view $ Map.insertWith (\_ old -> old+1) r 1
                     numView <- readIORef view >>= return . (! r)
                     print ("num aux: " ++ show numView ++ ", from " ++ show pidS) r
                     modifyIORef receivedAUXFrom $ Map.insert pidS ()
                   -- Determine whetherh view[r] is satisified for either of the bits
+
+                    if b then writeIORef auxT True
+                    else writeIORef auxF True
         
-                    b0 <- readIORef binPtrT
-                    b1 <- readIORef binPtrF
                     if (numView == thresh) then do
                       writeChan nMinusTChan ()
                     else ?pass
@@ -544,6 +549,8 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                 fork $ forever $ do
                     modifyIORef round $ (+) 1
                     writeIORef receivedAUXFrom (Map.empty :: Map PID ())
+                    writeIORef auxT False
+                    writeIORef auxF False
                     -- read what the current bit is from the last round
                     -- and supportCoin
                     s <- readIORef tryBit
@@ -625,15 +632,17 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                         ---- decide?
                         b0 <- readIORef binPtrF
                         b1 <- readIORef binPtrT
+                        aT <- readIORef auxT
+                        aF <- readIORef auxF
                         -- we know something is done, now determine support_coin
                         print ("b0: " ++ show b0 ++ " b1: " ++ show b1) r
-                        writeIORef supportCoin =<< if b0 && b1 then return True
-                                                   else if b0 && (b == False) then do
+                        writeIORef supportCoin =<< if (aF && b0) && (aT && b1) then return True
+                                                   else if (aF && b0) && (b == False) then do
                                                      -- decide False
                                                      writeIORef decided True
                                                      writeIORef decision b
                                                      return True
-                                                  else if b1 && (b == True) then do
+                                                  else if (aT && b1) && (b == True) then do
                                                      -- decide True
                                                      writeIORef decided True
                                                      writeIORef decision b
@@ -642,6 +651,21 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
                                                     dd <- readIORef decided
                                                     return False
                                                     -- ASSUME: a party that decided in r-1 never gets here
+                        --writeIORef supportCoin =<< if b0 && b1 then return True
+                        --                           else if b0 && (b == False) then do
+                        --                             -- decide False
+                        --                             writeIORef decided True
+                        --                             writeIORef decision b
+                        --                             return True
+                        --                          else if b1 && (b == True) then do
+                        --                             -- decide True
+                        --                             writeIORef decided True
+                        --                             writeIORef decision b
+                        --                             return True
+                        --                          else do
+                        --                            dd <- readIORef decided
+                        --                            return False
+                        --                            -- ASSUME: a party that decided in r-1 never gets here
 
                         return ()
                       Nothing -> error "can't call coin, no tokens"
