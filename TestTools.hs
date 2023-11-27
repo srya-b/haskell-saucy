@@ -206,8 +206,21 @@ envCheckQueue :: (MonadEnvironment m) =>
 envCheckQueue z2a clockChan tk = do
   envQueueSize z2a clockChan tk >>= (\c -> return (c>0))
 
-intersect :: [Int] -> [Int] -> [Int]
+intersect :: (Eq a) => [a] -> [a] -> [a]
 intersect l1 l2 = filter (\x -> x `elem` l2) l1
+
+intersectM :: (MonadITM m, Eq a) => m [a] -> m [a] -> m [a]
+intersectM xs ys = do
+  x <- xs
+  y <- ys
+  return $ intersect x y
+
+intersectM3 :: (MonadITM m, Eq a) => m [a] -> m [a] -> m [a] -> m [a]
+intersectM3 xs ys zs = do
+  x <- xs
+  y <- ys
+  z <- zs
+  return $ intersect x $ intersect y z
 
 invert :: (a,b) -> (b,a)
 invert (a,b) = (b,a)
@@ -323,7 +336,7 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
               readIORef ret
 
   let getByFilter x = do  
-              liftIO $ putStrLn $ "filtering by " ++ show x
+              --liftIO $ putStrLn $ "filtering by " ++ show x
               () <- alwaysCall
               vr <- readIORef recvVal
               --let idxs = map fst $ zip [0..] $ filter (\(p', v) -> (v == x)) vr
@@ -331,6 +344,9 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
               return idxs
   
   return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceivers, getByFilter, getLeaks)
+
+generateM :: MonadITM m => Gen a -> m a
+generateM g = do liftIO $ generate $ g
 
 {-
   * a filtering function that outputs a key and a value to store for the item

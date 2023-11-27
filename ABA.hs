@@ -24,6 +24,7 @@ import Async
 import Multicast (forMseq_)
 import Multisession
 import TokenWrapper
+import SCCMulticast
 
 import Safe
 import Data.List (findIndex)
@@ -37,123 +38,10 @@ import qualified Data.Map.Strict as Map
 
 import TestTools (envReadOut, envMapQueue, intersect, deliverListAll, envQueueSize)
 
---data TokenMsg a = (a, CarryTokens Int) deriving (Show, Eq)
---type TokenMsg a = (a, CarryTokens b) deriving (Show, Eq)
 data CastP2F a = CastP2F_cast a | CastP2F_ro Int deriving Show
-----type CastP2F a = TokenMsg (a, TransferTokens Int)
-----type RoP2F = TokenMsg Bool
---data CastF2P a = CastF2P_OK | CastF2P_Deliver a deriving (Show, Eq)
---data RoP2F = RoP2F_ro Int deriving (Show, Eq)
 data CastF2P a = CastF2P_OK | CastF2P_Deliver a | CastF2P_ro Bool deriving (Show, Eq)
---type CastF2P a = TokenMsg a
---type RoF2P = TokenMsg Bool
---data CoinP2F a = Either (CastP2F a) RoP2F deriving (Show, Eq)
---data CoinF2P a = Either (CastF2P a) RoF2P deriving (Show, Eq)
-
---type CastF2A a = (a, TransferTokens Int)
---data CoinF2A = Either (CastF2A a) RoF2A deriving (Show, Eq)
---data CoinA2F a = CastA2F_Deliver PID a deriving (Show, Eq) 
 data CastF2A a = CastF2A a | CastF2A_ro Bool deriving (Show, Eq)
 data CastA2F a = CastA2F_Deliver PID a deriving Show
-
---type CastP2F_cast a = (a, TransferTokens Int)
-data CoinCastP2F a = CoinCastP2F_cast (a, TransferTokens Int) | CoinCastP2F_ro Int deriving (Show, Eq)
-data CoinCastF2P a = CoinCastF2P_OK | CoinCastF2P_Deliver a | CoinCastF2P_ro Bool deriving (Show, Eq)
-data CoinCastA2F a = CoinCastA2F_Deliver PID (a, TransferTokens Int) | CoinCastA2F_ro Int deriving (Show, Eq)
-data CoinCastF2A = CoinCastF2A_ro Bool deriving (Show, Eq)
-
--- TODO: currently adv sends for free, we should change that
-{- We have   (CoinCastA2F t, TranferTokens Int) becuase runTokenA requires it -}
-fMulticastAndCoinToken :: MonadFunctionalityAsync m ((t, TransferTokens Int), CarryTokens Int) =>
-    Functionality (CoinCastP2F t, CarryTokens Int) (CoinCastF2P t, CarryTokens Int)
-                  (CoinCastA2F t, TransferTokens Int) CoinCastF2A Void Void m 
-                  --(CoinCastA2F t, CarryTokens Int) CoinCastF2A Void Void m 
-fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
-  let sid = ?sid :: SID
-  let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "fMulticastAndCoinToken" $ snd sid
-  let useTokens = False
-  tokens <- newIORef 0
-  -- strong coin requires the same coin for each party in a round
-  coinFlips <- newIORef (empty :: Map Int Bool)
-  
-  let print x = do
-          liftIO $ putStrLn $ x
-  -- strong coin requires the same coin for each party in a round
-  coinFlips <- newIORef (empty :: Map Int Bool)
-
-  let require cond msg = 
-            if not cond then do
-                liftIO $ putStrLn $ "\n\n\t[fMulticastToken Error]>>>>>>>" ++ show msg ++ "\n"
-                ?pass
-                readChan =<< newChan
-            else return ()
-  
-  if not $ member pidS ?crupt then do
-    fork $ forever $ do
-      (pid, x) <- readChan p2f
-      case x of
-        (CoinCastP2F_cast (m, DeliverTokensWithMessage st), SendTokens a) -> do
-          require (a >= 0) "negative tokens sent"
-          modifyIORef tokens $ (+) a
-          if pid == pidS then do
-{- TODO: is defaulting to sending 0 token the right thing or just halt ? -}
-            ?leak ((m, DeliverTokensWithMessage st), SendTokens a)
-            forMseq_ parties $ \pidR -> do
-              eventually $ do
-                tk <- readIORef tokens
-                if (tk >= 1)  then do
-                  --require (tk >= st) ("Not enough tokens. Need " ++ show st ++ ", have " ++ showf)
-                  writeIORef tokens (max 0 (tk-1-st))
-                  writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens (min st (tk-1))))
-                else return () -- ?pass
-            writeChan f2p (pidS, (CoinCastF2P_OK, SendTokens 0))
-          else ?pass 
-        (CoinCastP2F_ro r, SendTokens a) -> do
-          --require (a>=0) "no free ro queries >:("
-          liftIO $ putStrLn $ "ro request a: " ++ show a
-          tk <- readIORef tokens
-          --liftIO $ putStrLn $ "tokens bfore coin: " ++ show tk
-          modifyIORef tokens $ (+) (a-1)
-          --if r == 1 then writeChan f2p (pid, (CoinCastF2P_ro True, SendTokens 0))
-          --else if r == 2 then writeChan f2p (pid, (CoinCastF2P_ro False, SendTokens 0))
-          --else readChan =<< newChan
-          cf <- readIORef coinFlips
-          if not $ member r cf then do
-            b <- ?getBit
-            liftIO $ putStrLn $ "coin if not member"
-            modifyIORef coinFlips $ Map.insert r b
-            writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
-          else do
-            liftIO $ putStrLn $ "coin already cast"
-            b <- readIORef coinFlips >>= return . (! r)
-            writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
-  else do
-    delivered <- newIORef (empty :: Map PID ())
-    fork $ forever $ do
-      --(x, SendTokens tk) <- readChan a2f 
-      (x, DeliverTokensWithMessage tk) <- readChan a2f 
-      require (tk>=0) "negative tokens sent"
-      modifyIORef tokens $ (+) tk
-      case x of
-        CoinCastA2F_Deliver pidR (m, DeliverTokensWithMessage st) -> do
-          del <- readIORef delivered
-          --if member pidR del then return ()
-          if member pidR del then do
-            ?pass
-          else do
-            tks <- readIORef tokens
-            if  (tks >= st) then do 
-            --require (tks >= st) ("not enough tokens. need " ++ show st ++ ", have " ++ show tks)
-              modifyIORef tokens $ (subtract st)
-              modifyIORef delivered $ Map.insert pidR ()
-              writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens st))
-            else ?pass
-        CoinCastA2F_ro x -> do
-{- TODO: should the adv directly observe this? -}
-          require (tk > 0) "no free ro queries >:(" 
-          cf <- readIORef coinFlips
-          writeChan f2a (CoinCastF2A_ro True)
-  return ()
 
 data ABACast = AUX Int Bool | EST Int Bool deriving (Show, Eq)
 
@@ -161,7 +49,6 @@ data ABACast = AUX Int Bool | EST Int Bool deriving (Show, Eq)
     Total token cost: 2N+2
         2 broadcasts
 -}
-
 data SBcastVariant = SBcastSmall | SBcastLarge | SBcastCorrect deriving (Show, Eq)
 data SBSVariant = SBSSmall | SBSLarge | SBSCorrect deriving (Show, Eq)
 
@@ -537,138 +424,138 @@ protABABroken thresh bcastVariant svalVariant (z2p, p2z) (f2p, p2f) = do
 
     modifyIORef tokens $ (+) tks
     case msg of
-            ClockP2F_Pass -> error "shouldn't be passing anything"
-            ClockP2F_Through v -> do
-                r <- readIORef round
-                tryBit <- newIORef (not v)
-                s <- readIORef tryBit
-                supportCoin <- newIORef False
-                liftIO $ putStrLn $ "[" ++ show ?pid ++ "] input is " ++ show v
-                newSBCast 1 s False 
+      ClockP2F_Pass -> error "shouldn't be passing anything"
+      ClockP2F_Through v -> do
+          r <- readIORef round
+          tryBit <- newIORef (not v)
+          s <- readIORef tryBit
+          supportCoin <- newIORef False
+          liftIO $ putStrLn $ "[" ++ show ?pid ++ "] input is " ++ show v
+          newSBCast 1 s False 
 
-                fork $ forever $ do
-                    modifyIORef round $ (+) 1
-                    writeIORef receivedAUXFrom (Map.empty :: Map PID ())
-                    writeIORef auxT False
-                    writeIORef auxF False
-                    -- read what the current bit is from the last round
-                    -- and supportCoin
-                    s <- readIORef tryBit
-                    sc <- readIORef supportCoin
-                    r <- readIORef round
+          fork $ forever $ do
+              modifyIORef round $ (+) 1
+              writeIORef receivedAUXFrom (Map.empty :: Map PID ())
+              writeIORef auxT False
+              writeIORef auxF False
+              -- read what the current bit is from the last round
+              -- and supportCoin
+              s <- readIORef tryBit
+              sc <- readIORef supportCoin
+              r <- readIORef round
 
-                    -- isDecided is used ONLY to write output to Z
-                    isDecided <- readIORef decided
+              -- isDecided is used ONLY to write output to Z
+              isDecided <- readIORef decided
 
-                    mprint ("New round: " ++ show r) r
-                    mprint ("s_i: " ++ show s) r
-                    mprint ("supportCoin: " ++ show sc) r
-                    mprint ("SBCast (" ++ show (not s) ++ ", " ++ show (not sc) ++ ")") r
+              mprint ("New round: " ++ show r) r
+              mprint ("s_i: " ++ show s) r
+              mprint ("supportCoin: " ++ show sc) r
+              mprint ("SBCast (" ++ show (not s) ++ ", " ++ show (not sc) ++ ")") r
 {- [Token]: triggerssibly two broacasts so 2n max? -}
-                    newSBCast r (not s) (not sc)
-                    
-
-                    -- wait for one of the processes to write to the main thread
-                    -- saying that they set binptr[b] = True
+              newSBCast r (not s) (not sc)
+              -- wait for one of the processes to write to the main thread
+              -- saying that they set binptr[b] = True
 -- Here it makes sense to do the UC-required write operations 
 -- namely, saying OK to Z
 -- outputting the decision to Z
 -- or ?passing if neither applies
-                    first <- readIORef firstIteration
-                    firstDec <- readIORef firstDecide
-                    
-                    b0 <- readIORef binPtrF
-                    b1 <- readIORef binPtrT
-                    mprint ("binptr[T]: " ++ show b1 ++ ", binptr[F]: " ++ show b0) r
+              first <- readIORef firstIteration
+              firstDec <- readIORef firstDecide
+              
+              b0 <- readIORef binPtrF
+              b1 <- readIORef binPtrT
+              mprint ("binptr[T]: " ++ show b1 ++ ", binptr[F]: " ++ show b0) r
 
-                    -- get which binPtr is set to True
-                    whichBinPtr <- if first then do
-                      -- ASSUME: if OKing to environment then neither binPtr is true
-                      writeChan p2z (ABAF2P_Ok, SendTokens 0)
-                      modifyIORef firstIteration $ not
-                      readChan binPtrWaiting        -- wait for activation
-                    else do
-                      -- if either set proceed without waiting
-                      if b0 then return False       
-                      else if b1 then return True
-                      else do   -- if neither, then pass and wait for nuff EST
-                        ?pass
-                        readChan binPtrWaiting  
-                       
-                    -- ASSUME: only one should be true because
+              -- get which binPtr is set to True
+              whichBinPtr <- if first then do
+                -- ASSUME: if OKing to environment then neither binPtr is true
+                writeChan p2z (ABAF2P_Ok, SendTokens 0)
+                modifyIORef firstIteration $ not
+                readChan binPtrWaiting        -- wait for activation
+              else do
+                -- if either set proceed without waiting
+                if b0 then return False       
+                else if b1 then return True
+                else do   -- if neither, then pass and wait for nuff EST
+                  ?pass
+                  readChan binPtrWaiting  
+                 
+              -- ASSUME: only one should be true because
 
-                    -- set w for broadcast
-                    let w = if sc then s
-                            else whichBinPtr
+              -- set w for broadcast
+              let w = if sc then s
+                      else whichBinPtr
    
-                    let sidMain :: SID = (show ("maincast", pid, r, w), show (pid, parties, ""))
-                    multicast sidMain (AUX r w, DeliverTokensWithMessage 0)
+              let sidMain :: SID = (show ("maincast", pid, r, w), show (pid, parties, ""))
+              multicast sidMain (AUX r w, DeliverTokensWithMessage 0)
   
-                    if isDecided && firstDec then do
-                      gprint ("Deciding") r
-                      dec <- readIORef decision
-                      modifyIORef firstDecide $ not
-                      writeChan p2z ((ABAF2P_Out dec), SendTokens 0)
-                    else ?pass
+              if isDecided && firstDec then do
+                gprint ("Deciding") r
+                dec <- readIORef decision
+                modifyIORef firstDecide $ not
+                writeChan p2z ((ABAF2P_Out dec), SendTokens 0)
+                -- ASSUME at this point, ddn't wait for EST and bcast AUX
+                --        so will definitely wait for viewReady channel because
+                --        it can't have accepted any AUX messages for this round yet
+                --        since it hasn't ceded control yet since it decided at the end
+                --        of last round => it will wait for viewReady channel
+                naux <- readIORef nMinusTAux
+                if naux then (error "fucked")
+                else readChan viewReady
+              --else ?pass
+              else do
+                naux <- readIORef nMinusTAux
+                if naux then return ()
+                else do
+                  ?pass
+                  readChan viewReady
+              --else ?pass
 
-                    -- naux might have been satisfied while waiting above
-                    --       if reached here and true, we can move on to the coin
-                    --       otherwise wait for the process 
-                    naux <- readIORef nMinusTAux
-                    if naux then return ()
-                    else readChan viewReady
-                    print "got viewReady" r
-                    writeIORef nMinusTAux False
+              -- naux might have been satisfied while waiting above
+              --       if reached here and true, we can move on to the coin
+              --       otherwise wait for the process 
+              --naux <- readIORef nMinusTAux
+              --if naux then return ()
+              --else readChan viewReady
+              print "got viewReady" r
+              writeIORef nMinusTAux False
 
-                    -- get strong common coin
-                    bres <- commonCoinR r
-                    case bres of
-                      Just b -> do
-                        gprint ("Common coin: " ++ show b) r 
+              -- get strong common coin
+              bres <- commonCoinR r
+              case bres of
+                Just b -> do
+                  gprint ("Common coin: " ++ show b) r 
 
-                        -- this coin flip becomes the next s_i
-                        writeIORef tryBit b
+                  -- this coin flip becomes the next s_i
+                  writeIORef tryBit b
 
-                        ---- decide?
-                        b0 <- readIORef binPtrF
-                        b1 <- readIORef binPtrT
-                        aT <- readIORef auxT
-                        aF <- readIORef auxF
-                        -- we know something is done, now determine support_coin
-                        print ("b0: " ++ show b0 ++ " b1: " ++ show b1) r
-                        writeIORef supportCoin =<< if (aF && b0) && (aT && b1) then return True
-                                                   else if (aF && b0) && (b == False) then do
-                                                     -- decide False
-                                                     writeIORef decided True
-                                                     writeIORef decision b
-                                                     return True
-                                                  else if (aT && b1) && (b == True) then do
-                                                     -- decide True
-                                                     writeIORef decided True
-                                                     writeIORef decision b
-                                                     return True
-                                                  else do
-                                                    dd <- readIORef decided
-                                                    return False
-                                                    -- ASSUME: a party that decided in r-1 never gets here
-                        --writeIORef supportCoin =<< if b0 && b1 then return True
-                        --                           else if b0 && (b == False) then do
-                        --                             -- decide False
-                        --                             writeIORef decided True
-                        --                             writeIORef decision b
-                        --                             return True
-                        --                          else if b1 && (b == True) then do
-                        --                             -- decide True
-                        --                             writeIORef decided True
-                        --                             writeIORef decision b
-                        --                             return True
-                        --                          else do
-                        --                            dd <- readIORef decided
-                        --                            return False
-                        --                            -- ASSUME: a party that decided in r-1 never gets here
+                  ---- decide?
+                  b0 <- readIORef binPtrF
+                  b1 <- readIORef binPtrT
+                  aT <- readIORef auxT
+                  aF <- readIORef auxF
+                  -- we know something is done, now determine support_coin
+                  -- important that we only consider binPtrs for which there 
+                  -- is some AUX message (indicated by aT and aF)
+                  print ("b0: " ++ show b0 ++ " b1: " ++ show b1) r
+                  writeIORef supportCoin =<< if (aF && b0) && (aT && b1) then return True
+                                             else if (aF && b0) && (b == False) then do
+                                               -- decide False
+                                               writeIORef decided True
+                                               writeIORef decision b
+                                               return True
+                                            else if (aT && b1) && (b == True) then do
+                                               -- decide True
+                                               writeIORef decided True
+                                               writeIORef decision b
+                                               return True
+                                            else do
+                                              dd <- readIORef decided
+                                              return False
+                                              -- ASSUME: a party that decided in r-1 never gets here
 
-                        return ()
-                      Nothing -> error "can't call coin, no tokens"
+                  return ()
+                Nothing -> error "can't call coin, no tokens"
     return () 
 
 type ABATranscript = [Either

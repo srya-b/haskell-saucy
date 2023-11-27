@@ -228,6 +228,12 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
     let mprint s r = do
                     liftIO $ putStrLn $ "\t\t[" ++ show pid ++ ", " ++ show r ++ "] " ++ show s
 
+    let rprint s r = do
+                    liftIO $ putStrLn $ "\t\t\ESC[31m [" ++ show pid ++ ", " ++ show r ++ "] " ++ show s ++ "\ESC[0m"
+    
+    let yprint s r = do
+                    liftIO $ putStrLn $ "\t\t\ESC[93m [" ++ show pid ++ ", " ++ show r ++ "] " ++ show s ++ "\ESC[0m"
+
     let debug = False
     let dprint s r = do if debug then (print s r) else return ()
 
@@ -339,8 +345,11 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
                     else writeIORef auxF True
         
                     if (numView == thresh) then do
+                      rprint ("writeChan nMinusTChan ()") r
                       writeChan nMinusTChan ()
-                    else ?pass
+                    else do
+                      rprint ("?pass") r
+                      ?pass
                   else do
                     ?pass
 
@@ -409,18 +418,24 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
 
     -- reacts to SBCast(T) 
     binPtrWaiting <- newChan
+    trueToAux <- newChan
+    falseToAux <- newChan
+    mustWaitForOpposite <- newIORef False
     fork $ forever $ do
       -- wait for SBCast to notify
       () <- readChan sb2MainChanT
       r <- readIORef round
-      gprint ("got sb2MainChanT") r
+      yprint ("got sb2MainChanT") r
       bpT <- readIORef binPtrT
       bpF <- readIORef binPtrF
+      writeToAux <- readIORef mustWaitForOpposite 
       if bpT then error "binptr[T] = 1 but activated again"
       else if bpF then do
+        yprint ("bpF already True") 0
         -- ASSUME: is other binPtr is true, main thread isn't waiting
         writeIORef binPtrT True
-        ?pass
+        if writeToAux then writeChan trueToAux ()
+        else ?pass
       else do
         -- ASSUME: main thread waiting for channel write
         writeIORef binPtrT True
@@ -431,14 +446,16 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
     fork $ forever $ do
       () <- readChan sb2MainChanF 
       r <- readIORef round
-      gprint ("got sb2MainChanF") r
+      yprint ("got sb2MainChanF") r
       bpT <- readIORef binPtrT
       bpF <- readIORef binPtrF
+      writeToAux <- readIORef mustWaitForOpposite 
       if bpF then error "binptr[F] = 1 but activated again"
       else if bpT then do
-        mprint ("bpT already true, move on") r
+        yprint ("bpF already True") 0
         writeIORef binPtrF True
-        ?pass
+        if writeToAux then writeChan falseToAux ()
+        else ?pass
       else do
         writeIORef binPtrF True
         writeChan binPtrWaiting False
@@ -447,13 +464,23 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
     -- reacts to AUX threshold
     fork $ forever $ do
       () <- readChan nMinusTChan
+      rprint ("readChan nMinusTChan") 0
       bpT <- readIORef binPtrT
       bpF <- readIORef binPtrF
+
+      aT <- readIORef auxT
+      aF <- readIORef auxF
+
+      -- if neither of bpT or bpF:
+      --   set mustWaitForOpposite and wait for channel
+
       if bpT || bpF then do
         -- ASSUME: some true => main thread waiting
+        rprint ("bpt || bpF") 0
         writeIORef nMinusTAux True
         writeChan viewReady ()
       else do -- ASSUME: received AUX before EST => main thread waiting on binPtr
+        rprint ("not") 0
         writeIORef nMinusTAux True
         ?pass
 
@@ -557,7 +584,53 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
                   gprint "view ready from chan" r 
                   ?pass
                   readChan viewReady
+                  rprint ("readChan viewReady") r
 
+              -- n-t AUX messages now decide if we can move on
+              a1 <- readIORef auxT
+              a0 <- readIORef auxF
+              b1 <- readIORef binPtrT
+              b0 <- readIORef binPtrF
+
+              rprint ("a1: " ++ show a1 ++ " a0: " ++ show a0 ++ " b1: " ++ show b1 ++ " b0: " ++ show b0) r
+
+              if (a1 && a0) then do    -- we need bin_ptr[0] = T and bin_ptr[1] = T
+                rprint ("a1 and a0") r
+                if (b0 && b1) then do    -- good to move on
+                  gprint ("b1 and b0") r
+                  return () 
+                else if b0 then do       -- wait for bin_ptr[1]
+                  gprint ("b0, wait for b1") r
+                  writeIORef mustWaitForOpposite True
+                  ?pass
+                  readChan trueToAux
+                else do                  -- wait for bin_ptr[0]
+                  gprint ("b1, wait for b0") r
+                  writeIORef mustWaitForOpposite True
+                  ?pass
+                  readChan falseToAux
+              else if a1 then do      -- we need bin_ptr[1] = T
+                rprint ("a1, need binptr[1]") r
+                if b1 then do           -- good to move on
+                  gprint ("b1, good to go") r
+                  return ()
+                else do                 -- wait for bin_ptr[1]
+                  gprint ("wait for binptr[1]") r
+                  writeIORef mustWaitForOpposite True
+                  ?pass
+                  readChan trueToAux
+              else do                 -- need bin_ptr[0] = T
+                rprint ("a0, need binptr[0]") r
+                if b0 then do           -- good to move on 
+                  gprint ("b0, good to go") r
+                  return ()
+                else do                 -- wait for bin_ptr[0]
+                  gprint ("wait for binptr[0]") r
+                  writeIORef mustWaitForOpposite True
+                  ?pass
+                  readChan falseToAux
+
+              writeIORef mustWaitForOpposite False
               -- naux might have been satisfied while waiting above
               --       if reached here and true, we can move on to the coin
               --       otherwise wait for the process 
