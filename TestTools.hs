@@ -222,6 +222,29 @@ intersectM3 xs ys zs = do
   z <- zs
   return $ intersect x $ intersect y z
 
+shuffleM :: (MonadITM m) => m [a] -> m [a]
+shuffleM xs = do
+  x <- xs
+  generateM $ shuffle x
+
+shuffleAllM :: (MonadITM m) => [m [a]] -> m [a]
+shuffleAllM xss = do
+  finalSet <- newIORef []
+  forMseq_ xss $ \xs -> do
+    x <- xs
+    modifyIORef finalSet (++ x)
+  xs <- readIORef finalSet
+  generateM $ shuffle xs
+
+concatM :: (MonadITM m) => [m [a]] -> m [a]
+concatM xss = do
+  finalSet <- newIORef []
+  forMseq_ xss $ \xs -> do
+    x <- xs
+    modifyIORef finalSet (++ x)
+  readIORef finalSet
+  
+
 invert :: (a,b) -> (b,a)
 invert (a,b) = (b,a)
 

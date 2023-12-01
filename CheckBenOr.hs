@@ -58,6 +58,18 @@ benOrGenerator n numQueue ssid parties inputs round dts = frequency $
             return (Left (CmdTwoD (ssid (show sid)) (party !! 0) round inp 0, 0)))))) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)) 
     ]
 
+benOrOneMsg :: (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen BenOrInput
+benOrOneMsg ssid parties inputs round dts = do
+  shuffle parties >>= \pl -> oneof inputs >>= \i -> (choose (0, 999999) :: Gen Int) >>= \sid -> return (CmdOne (ssid (show sid)) (pl !! 0) round i dts, 0)
+
+benOrTwoMsg :: (String -> SID) -> [PID] -> Int -> Int -> Gen BenOrInput
+benOrTwoMsg ssid parties round dts = do
+  shuffle parties >>= \pl -> (choose (0, 999999) :: Gen Int) >>= \sid -> return (CmdTwo (ssid (show sid)) (pl !! 0) round dts, 0)
+
+benOrTwoDMsg :: (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen BenOrInput
+benOrTwoDMsg ssid parties inputs round dts =
+  shuffle parties >>= \pl -> oneof inputs >>= \i -> (choose (0, 999999) :: Gen Int) >>= \sid -> return (CmdTwoD (ssid (show sid)) (pl !! 0) round i dts, 0)
+  
 -- Takes in a BenOrCmd and executes it by writing the actual message on the channel
 -- makes it easy to create an environment that takes in a tape of commands and executes
 -- them all 
@@ -147,7 +159,12 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   cmdList <- newIORef []  
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
   
-  (deliverer,deliverByPairs,getByPairs,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump 
+  let valueFilter msg = case msg of
+                          One r b -> (1,r,b)
+                          Two r -> (2,r,False)
+                          TwoD r b -> (3,r,b)  
+  --(deliverer,deliverByPairs,getByPairs,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump 
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
 
   () <- readChan pump
   modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
@@ -224,11 +241,11 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
 prop_uBenOrSafety one two dec = monadicIO $ do
     forAllM ( suchThat (partiesBetween 6 10) nonZeroParties) $ \ps -> do
       let t = length ps `div` 5
-      pre $ nonZeroParties ps
       forAllM (cruptFrom ps t) $ \cc -> do
-        let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
+        --let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
+        let parties = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
         let prot () = protBenOrBreak one two dec 0
-        let crupt = ["Alice"]
+        let crupt = ["A"]
     -- TODO: commented generation of parties to test a simple aspect of the protocol
     --parties <- liftIO $ (generate arbitrary :: IO [PID])
     --crupt <- liftIO $ (generate $ sublistOf parties) >>= return . take (length parties `div` 5)
@@ -237,8 +254,8 @@ prop_uBenOrSafety one two dec = monadicIO $ do
         --pre $ length parties > 5
         --pre $ length parties > (5 * length crupt)
         --crupt <- liftIO $ generate $ sublistOf parties
-        (config', c', t') <- run $ runITMinIO 120 $ execUC 
-          (propUEnvBenOrSafety parties crupt 64)
+        (config', c', t', inps) <- run $ runITMinIO 120 $ execUC 
+          (propUEnvBenOrPartition parties crupt 64)
           (runAsyncP $ prot ()) 
           (runAsyncF $ bangFAsync fMulticastToken) 
           dummyAdversaryToken
@@ -266,6 +283,209 @@ prop_uBenOrSafetySCC = prop_uBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDec
 prop_uBenOrSafetySCS = prop_uBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDecideSmall
 prop_uBenOrSafetySSC = prop_uBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideCorrect
 prop_uBenOrSafetySSS = prop_uBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideSmall
+
+propUEnvBenOrPartition
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
+  Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
+     (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
+                  (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
+                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
+     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
+                  (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool) m
+propUEnvBenOrPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+  let extendRight conf = show ("", conf)
+  liftIO $ putStrLn $ "Parties: " ++ show parties 
+  liftIO $ putStrLn $ "Crupt: " ++ show crupts
+  --let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
+  let t = 1 :: Int
+  --let crupt = "Alice" :: PID
+  let honest = parties \\ crupts
+  let sssid = "sidTestACast"
+  let sid = (sssid, show (parties, t, ""))
+  
+  let yprint s = do liftIO $ putStrLn $ "\t\t\t\t\ESC[32m" ++ show s ++ "\ESC[0m"
+ 
+  let cruptMapList = map (\x -> (x,())) crupts
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
+  
+  cmdList <- newIORef []  
+  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+
+  let valueFilter msg = case msg of
+                          One r b -> (1,r,b)
+                          Two r -> (2,r,False)
+                          TwoD r b -> (3,r,b)  
+
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
+
+  let allOnes r = do getByFilter (1,r,True) >>= \x -> getByFilter (1,r,False) >>= \y -> return (x ++ y)
+  let allTwos r = getByFilter (2,r,False)
+  let allTwoDs r = do getByFilter (3,r,True) >>= \x -> getByFilter (3,r,False) >>= \y -> return (x ++ y)
+  let oneTrue r = do getByFilter (1,r,True)
+  let oneFalse r = do getByFilter (1,r,False)
+  let twoTrue r = do getByFilter (2,r,True)
+  let twoFalse r = do getByFilter (2,r,False)
+  let twoDTrue r = do getByFilter (3,r,True)
+  let twoDFalse r = do getByFilter (3,r,False)
+  let doDelivers ds = do
+            forMseq_ (deliverListAll ds) $ \i -> do
+              deliverer [] i
+  let doCmds cmds = do
+      forMseq_ cmds $ \cmd -> envExecCmd z2p z2a z2f clockChan pump cmd envExecBenOrCmd 
+  let getOneByArb r = do
+            whichInp <- generateM arbitrary
+            idxs <- getByFilter (1,r,whichInp)
+            return (whichInp, idxs)
+  let getTwoByArb r = do
+            idxs <- getByFilter (2,r,False)
+            return idxs
+  let getTwoDByArb r = do
+            whichInp <- generateM arbitrary
+            idxs <- getByFilter (3,r,whichInp)
+            return (whichInp, idxs)
+
+  () <- readChan pump
+  modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
+  
+  c <- envQueueSize z2a clockChan 1000
+  
+  --let inputs = do [return True, return False]
+ 
+  let inputTokens = importAmt
+
+  --pidsT <- selectPIDs honest
+  --let pidsF = honest \\ pidsT
+  let pidsT = ["B", "C", "D", "E"]
+  let pidsF = ["F", "G", "H", "I", "J"]
+ 
+  let ptm = map (\x -> (x,True)) pidsT
+  let pfm = map (\x -> (x,False)) pidsF
+  let inputM = Map.fromList (ptm ++ pfm)
+
+  forMseq_ (ptm ++ pfm) $ \(p,i) -> do
+    writeChan z2p $ (p, ((ClockP2F_Through $ BenOrP2F_Input i), SendTokens inputTokens))
+    readChan pump
+
+  -- partition 1 messages by input
+  c <- envQueueSize z2a clockChan 0
+  --oneToT <- intersectM (oneTrue 1) (getByReceivers pidsT)
+  --oneToF <- intersectM (oneFalse 1) (getByReceivers pidsF)
+  --doDelivers $ oneToT ++ oneToF
+
+  --yprint "\t\t\t\t T shoul have 4 and F should have 5"
+
+  --forMseq_ pidsT $ \p -> do
+  --  oneFtoP <- intersectM (oneFalse 1) (getByReceivers [p])
+  --  doDelivers $ take 3 oneFtoP
+  --  forMseq_ crupts $ \cpid -> do
+  --    cinp <- generateM $ vectorOf 5 $ benOrOneMsg (multicastSid sssid cpid parties) [p] [return True] 1 inputTokens  
+  --    doCmds (map Left cinp)
+
+  ---- adv (1,1,T) to pidsT
+
+  --forMseq_ pidsF $ \p -> do
+  --  oneTtoP <- intersectM (oneTrue 1) (getByReceivers [p])
+  --  doDelivers $ take 3 oneTtoP
+
+  --yprint "they should all be expecting 2 messages"
+
+  --twoDToT <- intersectM (twoDTrue 1) (getByReceivers pidsT)
+  --twoDToF <- intersectM (twoDFalse 1) (getByReceivers pidsF)
+  --doDelivers $ twoDToT ++ twoDToF
+
+  --yprint "\t\t\t\t\t T shoud have 4 and F should have 5"  
+ 
+  --forMseq_ pidsT $ \p -> do
+  --  twoFtoP <- intersectM (twoDFalse 1) (getByReceivers [p])
+  --  doDelivers $ take 3 twoFtoP
+  --  forMseq_ crupts $ \cpid -> do
+  --    cinp <- generateM $ vectorOf 5 $ benOrTwoDMsg (multicastSid sssid cpid parties) [p] [return True] 1 inputTokens  
+  --    doCmds (map Left cinp)
+
+  --forMseq_ pidsF $ \p -> do
+  --  twoTtoP <- intersectM (twoDTrue 1) (getByReceivers [p])
+  --  doDelivers $ take 3 twoTtoP
+  
+--------------
+ 
+  let rounds = 5
+  forMseq_ [1..rounds] $ \r -> do
+    yprint ("\t\t\t round: " ++ show r ++ " giving ones by partition")
+    -- give ones by partition
+    oneToT <- intersectM (oneTrue r) (getByReceivers pidsT)
+    oneToF <- intersectM (oneFalse r) (getByReceivers pidsF)
+    doDelivers $ oneToT ++ oneToF
+
+    -- deliver more 1's for some partition with random values
+    partition <- selectPIDs honest
+    forMseq_ partition $ \p -> do
+      forp <- getByReceivers [p]
+      (b', ones) <- getOneByArb r
+      liftIO $ putStrLn $ "\t\t\t\t deliver " ++ show ones ++ " to " ++ show p
+      doDelivers (intersect ones forp)
+
+    -- send adv 1's
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      someInput <- generateM arbitrary
+      cinp <- generateM $ vectorOf 5 $ benOrOneMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
+      modifyIORef cinps $ (++ (map Left cinp))
+    cinpCmds <- readIORef cinps
+    doCmds cinpCmds
+
+    yprint ("\tt give the rest of the 1s")
+    finalSet <- allOnes r
+    doDelivers finalSet
+
+    yprint ("\t\t deliver 2's by partition")
+
+      -- deliver 2's by partition
+    twoToT <- intersectM (twoTrue r) (getByReceivers pidsT)
+    twoDToT <- intersectM (twoDTrue r) (getByReceivers pidsT)
+    twoToF <- intersectM (twoFalse r) (getByReceivers pidsF)  
+    twoDToF <- intersectM (twoDFalse r) (getByReceivers pidsF)
+    liftIO $ putStrLn $ "\t\t\t\t delver 2's " ++ show (twoToT ++ twoDToT ++ twoToF ++ twoDToF)
+    doDelivers $ twoToT ++ twoDToT ++ twoToF ++ twoDToF 
+
+    -- adv 2's or 2D's   
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      cinp <- generateM $ vectorOf 5 $ benOrTwoMsg (multicastSid sssid cpid parties) honest r inputTokens  
+      modifyIORef cinps $ (++ (map Left cinp))
+    cinpCmds <- readIORef cinps
+    doCmds cinpCmds
+
+    -- adv 2's or 2D's   
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      someInput <- generateM arbitrary
+      cinp <- generateM $ vectorOf 5 $ benOrTwoDMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
+      modifyIORef cinps $ (++ (map Left cinp))
+    cinpCmds <- readIORef cinps
+    doCmds cinpCmds
+ 
+    -- select somesubset other twos 
+    partition <- selectPIDs honest
+    forMseq_ partition $ \p -> do
+      forp <- getByReceivers [p]
+      twos <- getTwoByArb r
+      (b', twoDs) <- getTwoDByArb r
+      doDelivers (intersect (twos ++ twoDs) forp)
+
+    yprint ("\t\t deliver rest of the pending")
+
+    -- deliver rest of 2's and 2D's and 1's
+    --finalSet <- intersectM (allOnes r) (intersectM (allTwos r) (allTwoDs r))
+    --finalSet <- shuffleAllM [allOnes r, allTwos r, allTwoDs r]
+    --finalSet <- concatM [allOnes r, allTwos r, allTwoDs r]
+    finalSet <- concatM [allTwos r, allTwoDs r]
+    doDelivers finalSet 
+ 
+  tr <- readIORef transcript
+  cl <- readIORef cmdList
+
+  writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr, inputM)
 
 -- When testing liveness in the optimistic case we're lookin for protocol design errors
 -- and we want to ensure that all messages are delivered. Failures in liveness here indicate

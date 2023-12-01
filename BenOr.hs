@@ -299,44 +299,52 @@ protBenOrBroken oneThreshold sendTwoDThreshold decideThreshold decideWhich
       case m of
         One r' x -> do
           --require (r' == r) $ "message for wrong round. expected " ++ show r ++ " got " ++ show r'
-          if (r' == r) then do
-            os <- readIORef ones
-            -- TODO we do not consider this a failure
-            if (not $ Map.member pid' os) then do
-              printBlue $ show pid' ++ show "-->" ++ show ?pid ++ show ": " ++ show m
-              modifyIORef ones $ Map.insert pid' ()
-              if (x == False) then do
-                modifyIORef numOne0 $ (+) 1
-              else if (x == True) then
-                modifyIORef numOne1 $ (+) 1
-              else error "not a 0 or 1"
+          ao <- readIORef alreadyOned
+          if (not ao) then do
+            if (r' == r) then do
+              os <- readIORef ones
+              -- TODO we do not consider this a failure
+              if (not $ Map.member pid' os) then do
+                printBlue $ show pid' ++ show "-->" ++ show ?pid ++ show ": " ++ show m
+                modifyIORef ones $ Map.insert pid' ()
+                if (x == False) then do
+                  modifyIORef numOne0 $ (+) 1
+                else if (x == True) then
+                  modifyIORef numOne1 $ (+) 1
+                else error "not a 0 or 1"
+                
+                n0 <- readIORef numOne0
+                n1 <- readIORef numOne1
+                printBlue $ "\t\t\t" ++ show ?pid ++ " num 0: " ++ show n0 ++ " num 1: " ++ show n1
+                printBlue $ "\t\t oneThreshold: " ++ show oneThreshold
 
-              total <- (readIORef numOne0 >>= \n0 -> readIORef numOne1 >>= (\n1 -> return (n0 + n1)))
-              --if total == (n - t) then do
-              --if total == (n - t - 1) then do
-              if (total == oneThreshold) then do
-                liftIO $ putStrLn $ "[BenOr " ++ show ?pid ++ "] reached 1 N-t"
-                num0 <- readIORef numOne0
-                num1 <- readIORef numOne1
-                writeIORef alreadyOned True
-                -- TODO: maybe we dont' send any import and rely on Z for giving enough to everyone
-{- this is    urnd smaller and shoult be > not >= -}
-                --if (num0 >= ((n+t) `div` 2)) then do
-                --if (num0 >= sendTwoDThreshold) then do
-                if (num0 > sendTwoDThreshold) then do
-                  liftIO $ putStrLn $ "reached TD for 0"
-                  multicast $ ((TwoD r False ), DeliverTokensWithMessage 0)
-                  ?pass
-                --else if (num1 >= ((n+t) `div` 2)) then do
-                --else if (num1 >= sendTwoDThreshold) then do
-                else if (num1 > sendTwoDThreshold) then do
-                  liftIO $ putStrLn $ "reached TD for 1"
-                  multicast $ ((TwoD r True ), DeliverTokensWithMessage 0)
-                  ?pass
-                else do
-                  liftIO $ putStrLn $ "[BenOr " ++ show ?pid++ "] 2,*"
-                  multicast $ ((Two r), DeliverTokensWithMessage 0)
-                  ?pass
+                total <- (readIORef numOne0 >>= \n0 -> readIORef numOne1 >>= (\n1 -> return (n0 + n1)))
+                --if total == (n - t) then do
+                --if total == (n - t - 1) then do
+                if (total == oneThreshold) then do
+                  liftIO $ putStrLn $ "[BenOr " ++ show ?pid ++ "] reached 1 N-t"
+                  num0 <- readIORef numOne0
+                  num1 <- readIORef numOne1
+                  writeIORef alreadyOned True
+                  -- TODO: maybe we dont' send any import and rely on Z for giving enough to everyone
+{- this is      urnd smaller and shoult be > not >= -}
+                  --if (num0 >= ((n+t) `div` 2)) then do
+                  --if (num0 >= sendTwoDThreshold) then do
+                  if (num0 > sendTwoDThreshold) then do
+                    liftIO $ putStrLn $ "reached TD for 0"
+                    multicast $ ((TwoD r False ), DeliverTokensWithMessage 0)
+                    ?pass
+                  --else if (num1 >= ((n+t) `div` 2)) then do
+                  --else if (num1 >= sendTwoDThreshold) then do
+                  else if (num1 > sendTwoDThreshold) then do
+                    liftIO $ putStrLn $ "reached TD for 1"
+                    multicast $ ((TwoD r True ), DeliverTokensWithMessage 0)
+                    ?pass
+                  else do
+                    liftIO $ putStrLn $ "[BenOr " ++ show ?pid++ "] 2,*"
+                    multicast $ ((Two r), DeliverTokensWithMessage 0)
+                    ?pass
+                else ?pass
               else ?pass
             else ?pass
           else ?pass
@@ -358,6 +366,7 @@ protBenOrBroken oneThreshold sendTwoDThreshold decideThreshold decideWhich
                 if t then do
                   d <- readIORef decision
                   writeIORef decided True
+                  writeIORef alreadyOned False
                   writeChan p2z (BenOrF2P_Deliver d)
                 else ?pass
               else ?pass
@@ -366,28 +375,34 @@ protBenOrBroken oneThreshold sendTwoDThreshold decideThreshold decideWhich
         TwoD r' x -> do
           --require (r' == r) $ "message for wrong round. expected " ++ show r ++ " got " ++ show r'
             if (r' == r) then do
-            --readIORef alreadyOned >>= \a -> require a "Two message out of order"
-            ao <- readIORef alreadyOned
-            if ao then do 
-              ts <- readIORef twos
-              -- TODO not a failure
-              if (not $ Map.member pid' ts) then do
-                printBlue $ show pid' ++ show "-->" ++ show ?pid ++ show ": " ++ show m
-                modifyIORef twos $ Map.insert pid' ()
-                modifyIORef numTwos $ ((+) 1)
+              --readIORef alreadyOned >>= \a -> require a "Two message out of order"
+              ao <- readIORef alreadyOned
+              if ao then do 
+                ts <- readIORef twos
+                -- TODO not a failure
+                if (not $ Map.member pid' ts) then do
+                  printBlue $ show pid' ++ show "-->" ++ show ?pid ++ show ": " ++ show m
+                  modifyIORef twos $ Map.insert pid' ()
+                  modifyIORef numTwos $ ((+) 1)
 
-                if x then modifyIORef numTwo1 $ (+) 1
-                else modifyIORef numTwo0 $ (+) 1      
+                  if x then modifyIORef numTwo1 $ (+) 1
+                  else modifyIORef numTwo0 $ (+) 1      
+              
+                  n0 <- readIORef numTwo0
+                  n1 <- readIORef numTwo1
+                  printBlue $ "\t\t\t" ++ show ?pid ++ " num2D 0: " ++ show n0 ++ " num2D 1: " ++ show n1
+
  
-                t <- isTimeToDecide 
-                if t then do
-                  d <- readIORef decision
-                  writeIORef decided True
-                  writeChan p2z (BenOrF2P_Deliver d)
+                  t <- isTimeToDecide 
+                  if t then do
+                    d <- readIORef decision
+                    writeIORef decided True
+                    writeIORef alreadyOned False
+                    writeChan p2z (BenOrF2P_Deliver d)
+                  else ?pass
                 else ?pass
               else ?pass
             else ?pass
-          else ?pass
   return ()
 
 testEnvBenOr
@@ -496,7 +511,13 @@ testEnvBreak numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
-  (deliverer, deliverByPairs,getByPair,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump
+  let valueFilter msg = case msg of
+                          One r b -> (1,r,b)
+                          Two r -> (2,r,False)
+                          TwoD r b -> (3,r,b)  
+
+  --(deliverer, deliverByPairs,getByPair,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
   () <- readChan pump
   
   writeChan z2p $ ("Bob", ((ClockP2F_Through $ BenOrP2F_Input True), SendTokens numTokens))
