@@ -95,10 +95,10 @@ fMulticastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           forMseq_ parties $ \pidR -> do
             eventually $ do
               tk <- readIORef tokens
-              --liftIO $ putStrLn $ "[multicast] trying to deliver between " ++ show (pidS, pidR)
+              liftIO $ putStrLn $ "[multicast] trying to deliver between " ++ show (pidS, pidR)
               if tk >=1 then do
                 writeIORef tokens (max 0 (tk-1-st))  -- Burn the delivery fee and send as many requested tokens to the receiver as possible
-                --liftIO $ putStrLn $ "[multicast] actually doing it " ++ show (pidS, pidR)
+                liftIO $ putStrLn $ "[multicast] actually doing it " ++ show (pidS, pidR)
                 writeChan f2p (pidR, (MulticastF2P_Deliver m, SendTokens (min st (tk-1))))  -- Includes either st or all tokens left in case of insufficient reserves
                 --writeChan f2p ((pidR, MulticastF2P_Deliver m), SendTokens (min st (tk-1))) 
               else error "tf" -- ?pass --return()

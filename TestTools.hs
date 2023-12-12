@@ -49,6 +49,13 @@ selectPIDs pids = do
 smallOffset :: Int -> Gen Int
 smallOffset t = fmap ((`mod` t) . abs) arbitrary
 
+readablePIDs = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+readableParties :: Int -> Int -> Gen [PID]
+readableParties x y = do
+  d <- smallOffset (y-x+1)
+  --((vectorOf (x+d) (elements readablePIDs)) `suchThat` noRepeatParties) :: Gen [PID]
+  return (take (x+d) readablePIDs)
+
 -- generate a list of parties of length between x and y
 partiesBetween :: Int -> Int -> Gen [PID]
 partiesBetween x y = do
@@ -64,7 +71,7 @@ nonZeroParties (x:xs) = case x of
 
 -- does the list of parties contain duplicates?
 noRepeatParties :: [PID] -> Bool
-noRepeatParties ps = length ps /= length set
+noRepeatParties ps = length ps == length set
   where set = Set.fromList ps
 
 -- is the list of parties non-trivial (no "" and no duplicates)
@@ -80,7 +87,7 @@ cruptFrom ps t = do
 --multicastSid :: (MonadIO m) => String -> PID -> [PID] -> String -> m SID
 multicastSid sssid snd ps s = (sssid, show (snd, ps, s))
 
-data AsyncCmd = CmdDeliver Int | CmdMakeProgress | CmdGetCount deriving (Eq, Show, Ord)
+data AsyncCmd = CmdDeliver Int | CmdMakeProgress | CmdGetCount | CmdGetLeaks deriving (Eq, Show, Ord)
 
 type AsyncInput = (AsyncCmd, Tokens)
 
@@ -196,7 +203,7 @@ envQueueSize :: (MonadEnvironment m) =>
   (Chan ((SttCruptZ2A (ClockP2F _p2f) (Either ClockA2F _a2f)), CarryTokens Int)) ->
   Chan Int -> Int -> m Int
 envQueueSize z2a clockChan tk = do
-  writeChan z2a $ (SttCruptZ2A_A2F (Left ClockA2F_GetCount), SendTokens 0)
+  writeChan z2a $ (SttCruptZ2A_A2F (Left ClockA2F_GetCount), SendTokens tk)
   readChan clockChan
 
 -- is the current queue non-empty?
@@ -245,6 +252,13 @@ concatM xss = do
   readIORef finalSet
   
 
+compareTranscript :: Eq a => [a] -> [a] -> Int
+compareTranscript [] _ = 0
+compareTranscript _ [] = 0
+compareTranscript (a:as) (b:bs) =
+  if a == b then 1 + compareTranscript as bs
+  else 0
+
 invert :: (a,b) -> (b,a)
 invert (a,b) = (b,a)
 
@@ -265,6 +279,7 @@ envMapQueue :: (MonadEnvironment m, Eq a, Show _leak, Show a) =>
   (Chan (SttCruptA2Z _f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) _f2a))) -> Chan Int -> 
   IORef (Maybe (Either (SttCruptA2Z f2p (Either (ClockF2A (SID, ((_leak, TransferTokens Int), CarryTokens Int))) f2a)) (PID, p2z))) ->
   Chan () -> (_leak -> a) ->
+    IORef [Either _ AsyncInput] ->
     m ( [(PID,PID)] -> AsyncCmd -> m (),  -- doDeliver
         [(PID,PID)] -> m (),              -- deliverByPairs
         (PID,PID) -> m [Int],             -- getByPair
@@ -272,7 +287,7 @@ envMapQueue :: (MonadEnvironment m, Eq a, Show _leak, Show a) =>
         [PID] -> m [Int],                 -- getByReceiver
         a -> m [Int],                     -- getByFilter 
         m [(SID, ((_leak, TransferTokens Int), CarryTokens Int))] )   -- getLeaks
-envMapQueue z2a a2z clockChan lastOut pump fil = do
+envMapQueue z2a a2z clockChan lastOut pump fil cmdList = do
   ctr <- newIORef 0
   sendPairs <- newIORef []
 
@@ -290,6 +305,7 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
   let alwaysCall = do
             -- first get the leas
             writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
+            modifyIORef cmdList $ (++ [Right (CmdGetLeaks, 0)])
             () <- readChan pump
             mf <- readIORef lastOut
             let Just (Left (SttCruptA2Z_F2A (Left (ClockF2A_Leaks leaks)))) = mf
@@ -315,15 +331,17 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
             else do 
               sp <- readIORef sendPairs
               rv <- readIORef recvVal
-              --liftIO $ putStrLn $ "delivering idx: " ++ show idx
+              liftIO $ putStrLn $ "delivering idx: " ++ show idx
               modifyIORef sendPairs (deleteNth idx)
               modifyIORef recvVal (deleteNth idx)
               writeChan z2a $ ((SttCruptZ2A_A2F $ Left (ClockA2F_Deliver idx)), SendTokens st)
+              modifyIORef cmdList $ (++ [Right (CmdDeliver idx, st)])
   let doDeliver censorList cmd = do
                case cmd of 
                  (CmdDeliver idx') -> do
                      () <- deliverIdx idx' 0 censorList
                      readChan pump
+                     liftIO $ putStrLn $ "got back"
                  _ -> error "should only be doing delivers" 
                return ()
 
@@ -368,7 +386,7 @@ envMapQueue z2a a2z clockChan lastOut pump fil = do
   
   return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceivers, getByFilter, getLeaks)
 
-generateM :: MonadITM m => Gen a -> m a
+generateM :: MonadIO m => Gen a -> m a
 generateM g = do liftIO $ generate $ g
 
 {-
@@ -531,6 +549,9 @@ envExecAsyncCmd z2p z2a z2f clockChan pump cmd = do
         return ()
     (CmdMakeProgress, _) -> do
         writeChan z2f ClockZ2F_MakeProgress
+        readChan pump
+    (CmdGetLeaks, st') -> do
+        writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks), SendTokens 0)
         readChan pump
   return ()
 

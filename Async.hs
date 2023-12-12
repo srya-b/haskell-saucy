@@ -114,8 +114,8 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
                        --liftIO $ putStrLn $ "delivering"
                        modifyIORef runqueue (deleteNth idx)
                        writeChan (q !! idx) ()
-                     else do
-                       ?pass
+                     else writeChan f2a $ Left ClockF2A_Pass
+                       -- pass
       Left (ClockA2F_Delay rounds) -> do
                      if rounds > 0 then do
                        dl <- readIORef delay

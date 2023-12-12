@@ -205,7 +205,7 @@ partyWrapper sid crupt passer (z2p, p2z) (f2p, p2f) (a2p, p2a) p = do
   -- Route messages from environment to honest parties
   fork $ forever $ do
     (pid, m) <- readChan z2p
-    if member pid crupt then error "env sent to corrupted party!" else return undefined
+    if member pid crupt then error ("env sent to corrupted party!" ++ show pid) else return undefined
     --liftIO $ putStrLn $ "party wrapper z->p received"
     _pid <- getPid z2pid pid
     writeChan _pid m 
