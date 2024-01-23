@@ -792,8 +792,9 @@ testEnvABAMinority z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
                             AUX r b -> (2, r, b)
                             EST r b -> (1, r, b)
 
+    cmdList <- newIORef []
     (lastOut, transcript, clockChan) <- envReadOut p2z a2z
-    (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter
+    (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter cmdList
    
     c <- envQueueSize z2a clockChan 1000 
     let gprint s = do liftIO $ putStrLn $ "\ESC[32m" ++ show s ++ "\ESC[0m"

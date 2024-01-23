@@ -1,0 +1,332 @@
+Minimum change to ACast to demonstrate this import thing with prolonged protocols. 
+ACast, at the moment of making a decision flips and coin and decides whether to
+``eventually'' make the decision rather than make it now. The quickcheck environment
+will still execute all the code blocks but might run out of import if there is a...
+
+perhaps for liveness checks the best way is for no assert statements, but log every 
+discrepency resulting from out of import errors and print the number of failues to
+successes
+
+makes sense for shared resource to partiiton to applications
+if you don't have SID prefixes and allow F to discriminate
+
+then you're modelling sandbox that doesn't support isolation at all
+so they can tap into sockets of other client communication
+
+lemma 17
+--------
+how to recognize a particular round? AUX message will always be broadcast or 
+
+What have we done design wise?
+-------------------------------
+The adversary never sends tokens to fMulticast when delivering a message to someone, i.e. never pays for it
+
+similarly, right now in bangFtoken the adverasry isn't charged anything --> this may be becaus adversaries right now don't track their own tokens.
+
+When the protocol parties or fMulticast don't have enough tokens to continue
+they do a best effort and send as many tokens as they can. This is not the
+intended behavior of ITMs as ideally they should halt. However, to facilitate
+termination of the program, in order for tests to detect a failure, we need
+that contorl always returns back to the environment rather than machine
+shalting and the write token being stuck in some other ITM indefinitely.
+
+Changed require in protACast so that when a require failsthe machine doesn't
+just halt but it does ?pass all the time. This way quickCheck tests terminate,
+rather than hang indefinitely, and we can deal with the failed test case
+accordingly. TODO: maybe the better way is a more direct output to Z that it
+failed so that the ?pass doesn't go to the simulator that tries to do something
+with it.  z2p output ensures quickCheck can detect a direct failure and we can
+condition properties on it. 
+
+fMulticast no longer crashes on a bad adversary. Before it did a return () when
+the same pidR was delivered to in the same instance of fMulticast. Now it does
+a ?pass but there is a race condition in the ideal world. Likely in the
+simulator. OKAY the cause is taht require does a ?pass but then the main body
+also does a ?pass. Therefore, require not returns a Bool and the main body
+conditions further operations on the return value.
+
+some things can't be unstructured like the set of all possible strings for an agreement protocol to attempt
+
+sees like also need to ensure all environment actons are "always executable" so that semantically bad input is ignores (like require statements failing) so that theprotocol can catch erors rather than halt and hang forever
+
+
+** Very cool that fuzz testing helps detects corner cases, esp in error
+   handling by forcing race conditions in program print statements. Helps to
+   enforce the write-after-read when it isn't checked in the type system.
+
+# TODO
+** currently with !F we have the message format (SID, (m, tokens)) which
+   includes tokens as "content" when in fact it should be ((SID,m), tokens) as
+   they are part of the framework of an itm-to-itm message.
+** currently when multicast returns to an ideal party we have that it sends
+   back (m, TransferTokens Int) rather than CarryTokens Int. CarryTokens indicate
+   the import being sent with the message whereas TransferTokens is used as an
+   input parameter to fMulticast to instructhow much import to send to the
+   receiver of the message. BECAUSE adversaries receive no import on their
+   backdoor tapes (messages from corrupt parties or the functionality), we need an
+   idealProtcol suited to import tokens which strips the token amount from the
+   message. So it receives ((SID, m), CarryTokens Int) but only sends (SID, m) to
+   the adversary.
+** right now fMulticastToken leaks ((m, TransferTokens Int), CarryTokens Int)
+   but do we need to leak that? YES we do to replay the message in the internal
+   simulation with the right amount of import
+** currently the if f2a carries tokens then the type given to the dummy
+   adversary is ((m, CarryTokens Int), CarryTokens Int). Terefore, dummy adv
+   should change to accept TrasnferTokens with every message so the type is ((m,
+   TransferTokens Int), CarryTokens Int) and it strips it and sends (m,
+   CarryTokens Int) to P or to F
+
+
+
+TODO for Liveness
+-----------------
+BenOr liveness
+* expected time to terminate is O(2^(2n)) 
+* we vary by import --> can we determine this termination number of rounds? Can we count the number of rounds that it takes??
+* add conditional test cases so that we run more ==> only check for all termination if one party terminates because it may be the case that for some test cases the inputs are so badly formed that nothing interesting happens
+* inject a coin flip to prevent termination and see what probabilities of coin flips can be caught within a reasonable amount of time ==> where to inject coin flips ==> does this even make sense as a testing strategy? sounds kind of bullshit 
+
+Can't do
+=========
+* confirm or estimate the expected termination time? we can compute the mean but doing so requires careful consideration of the distribution the inputs environments are drawn from
+    and likely can't be validated at all
+
+
+Can do
+======
+* protocls in UC define the import that each message is given and this, from the perspective of the protocol designer, reflects some expectation on the number of rounds the protoco takes to terminate.
+    We can ask:
+    - how often does the protocol succeed given this import
+    - when import is increased, how does the percent of tests that terminate change?
+    - if we increase linearly, quadratically, exponentially, do we still encounter cases where the protocol may never terminat with all parties deciding a value?
+  what can we say about such results even if we have them? what we have now is that this is a cool thing that we can do but is there a covincing validatio technique? 
+* test assumptions of handling advesaries. Discover corner cases where the thresholds set do not allow for agreement even when they should. This was clear in the ben-or protocol where the threshold
+    resulted in honest parities not being able to decide on a value even when the corrupt party did nothing (recheck whether this is even true for BenOr. iirc we for the straightorward environment we always decided but as soon as things are delivered out of order we run into problems. In truth this may be a result of the fact that ben-or doesn't wait for messages to arive it moves on to the next round if a threshold isn't met. So, even if we can achieve consensus, doesn't mean we will because of how the protocol is designed). This is not a very interesting thing.
+
+Perhaps Classify what different types of structure can give you
+================================================================
+Here we refer to environments that give inputs round by round or whether they throw random input at the protocol and see what happens. 
+For protocols like BenOr, though not a serious agreement protocol, we expect round by round input to give agreement with high probability.
+>>> such environments are useful for discovering faults where agreement simply can't be reached. what we mean is protocols where, despite, no malicious activity (but crash fault party), the protocol parties
+still can't reach agrement. These environments are structured to produce protocol-specific input sequences and therefore are supposed to yield agreement
+
+Unstructured environments throw random input at the protocols to see what happens. Generally, these help identify bugs of valiating messages that are received, being coerced into agreeing on the wrong value.
+With malicious parties giving input  
+
+
+Limitations for replicating Jepsen
+==================================
+there is not inherent notion of time in UC
+the way in which messages are delivered to processes, say the Tendermint process, I don't think we can adequately test the multi-threaded processes that tendermint uses to process messages. For example if two messages are delivered within miliseconds of each other we can't test race conditions that arise from this. Basically, at the highest lever we can test logical errors and some out-of-order-message problems but not race conditions within a code base. 
+When designing with UC natively, there may be subcomponents that do multi-threaded messages delivery and we test that separately and rely on security through composition to only have to test logical erors in tendermint. 
+----
+
+safety: we're contending with asynchronous networks so messages get dropped
+    - deliver random subsets of messages
+    - give crupt input
+    pre (o>1)
+    assert (set.size o) == 1
+
+agreement:
+    - deliver random subsets of messages
+    - give crupt input
+    assert n==5
+
+liveness: we care that if everything goes well, does the protocol's logic fail?
+    - deliver all messages
+    - crupt input not important
+    assert n==5
+
+
+Why can't I get equivcation with 2 crupt with t=1?
+--------------------------------------------------
+When we have 5 honest and 1 crupt, it takes only one well-placed message to make an honest party
+decide something when the threshlds are too low. 
+When there are 2 corrupt parties (which the protocol can't hold) one of the parties needs to 
+achieve the right order of messages for each of the honest parties to get them all to decide. 
+This lowers the probabilities of honest parties deciding anything. This makes sense as an answer.
+
+
+Looking at Optimistic BenOr Livensss with increasing rounds
+============================================================
+we collect (r,n) where r is the number of rounds the environment ran for and n is the number of parties that decideda a value (n=5 is everyone). liveCoin = 5% 
+57% (5,5)
+17% (5,0)
+10% (5,3)
+ 7% (5,4)
+ 5% (5,1)
+ 4% (5,2)
+
+71% (10,5)
+14% (10,3)
+10% (10,4)
+ 4% (10,2)
+ 1% (10,1)
+
+62% (15,5)
+13% (15,4)
+12% (15,2)
+12% (15,3)
+ 1% (15,1)
+
+64% (20,5)
+20% (20,3)
+ 9% (20,4)
+ 4% (20,2)
+ 3% (20,1)
+
+HERE WE DO NOT DELIVER ALL MESSAGES
+We notice clearly that increasing the number of rounds of the environment doesn't yield any meaningfl results. I think the test generator here is determining the probability of success because it is determining the probabilityi with which the correct messages are sent that _would_ result in a decision.
+INTERESTING; we notice that as the number of rounds increases the 0 cases disappear. Is this universal? NEED TO RUN THIS MULTIPLE TIMES OR WITH A LARGER LIST OF ROUNDS TO DETERMINE
+
+Potential bugs to introduce:
+* a random coin flip in each node to determine whether it should decide: the DOWNSIDE is that we can only tell if this is a liveness issue if we can compare to a correct implemenation and see how the distribution of the above data changed, right?
+
+* create an environment where everyone _should_ decide optimistically -> introduce bugs and can you tell percentages
+
+For benOr liveness it seems to be necessary that we don't deliver all messages but vary te numbe rof delivered per round.
+eventually when all are delivered we may see some decision happening. Maybe do this for ABA instead??
+
+in a sync network we can do more maybe like timeouts and such (if protocols have some internal sense of time)
+
+
+
+
+Schedulers
+----------
+want a scheduler parameter that, on every call gives and index to deliver from  the runqueue
+this way we can do a forAllM ( schedulers )
+-- perhaps the way to do it is give the environment handles to sort messages in the queue by specific   input values, by specific senders, by specific receivers then use combinators for set intersection
+okay then how do we use this to encode an environment for discovering the round issu
+
+-- split 2/3 with T and F
+    LEFT OVER:  (1,T) from {B,C} to {A,B,C,D,E,F}
+                (1,F) from {D,E,F} to {A,B,C,D,E,F}
+-- give the Fs their own messages and Alice gives them F message 
+    LEFT OVER:  (1,T) from B to all
+                (1,T) from C to all
+                (1,F) from {D,E,F} to {A,B,C}
+
+-- 
+
+
+Injecting Bugs
+==============
+    Some class of bugs are not possible to cause violations.  Take the ABA
+protool that has an error where protocol parties accept the same message twice
+from the same party.  In this case, the ovbious first thought is that the
+corrupt party just sends n-t AUX messages to a party and cause it to decide.
+However, if the protocol uses the sssid of fMulticast to rely on the (est/aux,
+sender, parties, round) then the adversary is limited to sending messages an AUX
+message through 1 specific instance of fMulicast which doesn't allow sending two
+messages to the same receiver.  What is the implication of this?
+    1. Mechanics of UC or how a user chooses to program (set the ssids) can
+       affect whether a bug is easier to cactch.
+    2. UC machinery is unecessarily standin in the way of bug detection.
+    3. There is some resilience to UC where the programmer can buid in these
+       kinds of protections by reying on an ideal functionality that offers some
+       service. 
+
+Perhaps a consequence of this kind of fault is that some parties decide
+prematurely and so the other parties are never able to decide because the other
+parties stop participating faithfully?  One thing that we can potentially say
+is that it's unknown and unclear how protocols interact when their assumptions
+about the other are violated. This can exacerbate finding subtle bugs and
+points to decomposing protocol into subcomponents rather than designing on
+monolithic protocol like in the case of SBCast and ABA.
+
+The outputs of parties only convey what bit the parties decide on. Therefore,
+this information on it's own doesn't aways give an idea about bugs internally.
+A lot of the time implementation bugs manifest themselves as:
+  * parties fail to do anything
+  * parties never advance past the first stage of the round (in the case of ABA,
+  parties never advance past EST messages)
+  * one set of parties decide when they shouldn't and the rest aren't able to
+This begs the question, can we use the adversary leak messages to infer
+something going wrong?
+
+
+In trying to break and catch ABA bugs, I came across places where the text of
+the ABA paper was vague and came across a bug in my implementation that didn't
+capture the intent of the specification.  In the optimsitic case the
+implemented  protocol still works as indended. Even with a crash fault the
+protocol still terminats and parties all decide the same value.  However, when
+trying to play with the thresholds and break the protocol, I discovered paths
+where the protocol doesn't conform to the intent of the spec. This became
+apparently only after devising a fuzzing strategy of partitioning parties based
+on the value they propose and observing strange behavior where they all still
+decided on one value. In a sense, such a test case should fail to cause some
+parties to terminate but all generated environments that result in some parties
+deciding let to partitioned parties deciding values they never receive any
+messages for.  This perhaps speaks in favor of the fuzz testing with UC.
+
+This lead me down a path of thinking of what we're calling a bug and what
+failures are actually important to catch.  The simplest class of bugs we can
+"inject" are that thresholds are incorrectly set. For example, instead of a
+party requiring `n-t` messages in order to take an action we set the threshold
+`n-t-1` and hope that fuzzing finds the edge case to exploit it.  When a bug
+violates safety, it is clear from honest output to Z that the property was
+violated.  This kind of bug is a protocol-level bug, i.e. it violates a state
+property of the protocol.  Other bugs, more subtle ones, may not necessarily
+manifest themselves in a way that makes it easy to conclude that the bug
+exists.  Many bugs in a protocol may only cause some honest parties to never
+decide any value. For example, some subset of parties decide and their behavior
+afterwards makes it impossible for the others to ever decide any value.  In
+such a case, the type of environment chosen/generated is important. An
+environment that implements only crash faults and delivers all messages in
+every round is expected to always force decision and so the existence of a bug
+is known DEFINITIVELY.  If the same protocol behavior arises from environments
+that withold some messages from some parties until a later round, then it isn't
+clear whether such an environment should result in all parties deciding on a
+value. The latter kind of bug may be possible to identify by looking at adverasry
+leaks and surmising something protocol-specific.  For example, you define what
+"locked" behavior looks like for a protocol party. This might be somethin like
+a protocol party keeps outputting the same messages and isn't progressing
+through the differet stages of the protocol. 
+
+This raises two questions, each of which merit a discussion:
+    1. Given that fuzzing isn't a goal in itself but rather an "experimental
+apparatus", do we care about classifying types of environments or giving some
+relationships between environment types and what they can catch (it may end up
+being very protocol specific) or giving a methodology for how to interpret
+results from fuzz testing? 
+    2. How do we categorize the kinds of bugs we inject (or try to be more
+formal about what bugs weintroduce across the different protocols) and do we
+care about bugs that aren't protocol-level bugs?
+    "protocol-level bugs" := for example a subprotocol that ABA uses has these properties:
+        -- s-termination: all calls to it terminate
+        -- s-justification: if some process got v back then an honest process
+                            called SB(v, true)
+        -- s-uniformity: if some process gets v back then all get v back
+        -- s-obligation: if t+1 honest call SB(v, true) then eventually all
+                            honest get v back
+
+
+
+
+But what do you classify this bug as? Is this a failure of the programmer to read the spec correctly? Is this a failure of the paper spec and whatever analysis it did to arrive at thresholds? Should we care about the distinction between the two cases?
+
+More subtle, and prolly more interesting or probable, bugs likely wouldn't manifest themselves as a safety violation. In fact, it is more is likely that bugs might prevent certain parties from deciding any output at all. When a generated environment encounters output where some parties decide and some don't it the specific environment strategy chosenbecomes relevant. If the environment strategy is to always deliver all messages in each round of the protocol (in arbitrary order) then it is worth investigating as it should always succeed. If the environment partitions parties like above and some don't decide then it's it might be a problem and it might not. 
+We discussed last week that we should think of fuzzing as the experimental apparatus to make our point: "UC fits well into software engineering, just look at how it makes fuzzing distributed systems much easier". 
+With that in mind, do we care to say something about how to interpret results or how to relate certain kinds of environments to certain kinds of failures? 
+
+
+
+Question about bugs.
+====================
+some bugs like not checking rounds in ABA, are exploiting assumptions made when
+wrting the protocol rather than protocol-level problems: without this
+assumption we get concurrency issue because we don't expect messages from
+previous rounds at the wrong times. 
+
+
+
+
+Our goal is to present show that UC can be used for traditional software engineering and UC provides benefits in its definition to writing good sotware.
+Towards this end we want to argue that successful / tradtional testing techniques like fuzzing can be applied to implementations in UC. 
+There is anoter part to this, that we have to motivate that something about UC-ness helps software development. Already discussed trying to emulate paper
+definitions as a beneficial goal (which is obvious). Already pointed out that ideal functionalities function as a protcol spec to be used as the abstraction layer between code packages, for example, and havng a spec to test again is built-in with UC.
+Simulator proofs can also be validated (TBD) making literature more usable and falsifiable (borrow reasoning from literature about PL tools for UC).
+
+** also good to discover new lemma / properties about the protocol that can be rapidly tested ==> validates proofs / properties  
+

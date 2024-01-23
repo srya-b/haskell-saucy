@@ -177,14 +177,17 @@ envReadOut :: (MonadEnvironment m, Show p2z) => Chan (PID, p2z) ->
   Chan (SttCruptA2Z f2p (Either (ClockF2A leak) f2a)) ->
   m (IORef (Maybe (Either (SttCruptA2Z f2p (Either (ClockF2A leak) f2a)) (PID, p2z))),
   IORef [Either (SttCruptA2Z f2p (Either (ClockF2A leak) f2a)) (PID, p2z)], 
-  Chan Int)
+  Chan Int, IORef [Either [leak] (PID, p2z)])
 envReadOut _p2z _a2z = do
   clockChan <- newChan
   lastOut <- newIORef Nothing
-  transcript <- newIORef []
+  transcript <- newIORef ([] :: [Either leak (PID, p2z)])
+  leakLimited <- newIORef []
+  ctr <- newIORef 0
   fork $ forever $ do
     (pid, m) <- readChan _p2z 
     liftIO $ putStrLn $ "\ESC[31mParty [" ++ show pid ++ "]: " ++ show m ++ "\ESC[0m"
+    modifyIORef transcript $ (++ [Right (pid, m)])
     modifyIORef transcript $ (++ [Right (pid, m)])
     writeIORef lastOut (Just (Right (pid, m)))
     ?pass
@@ -193,10 +196,17 @@ envReadOut _p2z _a2z = do
     modifyIORef transcript $ (++ [Left m])
     case m of
       SttCruptA2Z_F2A (Left (ClockF2A_Count c)) -> writeChan clockChan c
+      SttCruptA2Z_F2A (Left (ClockF2A_Leaks l)) -> do
+        writeIORef lastOut (Just (Left m))
+        t <- readIORef ctr
+        let tail = drop t l
+        modifyIORef ctr (+ length tail)
+        modifyIORef leakLimited $ (++ [Left tail]) 
+        ?pass
       _ -> do 
         writeIORef lastOut (Just (Left m))
         ?pass
-  return (lastOut, transcript, clockChan) 
+  return (lastOut, transcript, clockChan, leakLimited) 
 
 -- returns the current size of the queue
 envQueueSize :: (MonadEnvironment m) =>

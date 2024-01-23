@@ -1,0 +1,280 @@
+ben or breaking
+----------------
+partition by T and F 
+and deliver 1s
+
+for T: give some of them some messages from F + adv give by partition (or arb)
+for F: give some of the some messages from T + adv give by partition (or arb)
+
+(maybe adv picks its own partition)
+give all 1 messages
+
+give two messages arbitrarily
+give twoD messages by partition
+
+for T: give some of them some messages from F + adv give by partition (or arb)
+for F: give some of the some messages from T + adv give by partition (or arb)
+
+give all 2 messages  
+
+
+
+ANOTHER BUG: newround before setting x_p
+========================================
+in randomized testing, only those there no 2D is broadcast will result in failure to complete
+in other cases it won't so probability of liveness error is the same as probabiity of getting a
+5,5 split
+==> another test case, partition the parties and see how the protocol completes/performs
+always 10 parties
+all correct runnin 5 rounds
+with bug                 without
+
+82% (5,10)               +++ OK, passed 100 tests:
+ 5% (5,0)                80% (5,10)
+ 5% (5,5)                 7% (5,0)
+ 3% (5,6)                 3% (5,3)
+ 2% (5,3)                 3% (5,5)
+ 2% (5,8)                 3% (5,7)
+ 1% (5,4)                 2% (5,4)
+                          2% (5,6)
+
+
+partitioning 5/5 every time (top)              random partitioning (bottom)
+should be more failures                          prob of 5/5 is 0.009% therefore should be 0 failures most of the time
+ 89% (5,10)                                          97% (5,10)
+  2% (5,3)                                            2% (5,5)
+  2% (5,4)                                            1% (5,6)
+  2% (5,6)
+  2% (5,7)                                           97% (10,10)
+  2% (5,8)                                            2% (10,3)
+  1% (5,5)                                            1% (10,5)
+                                                     
+ 90% (10,10)                                         92% (15,10)
+  4% (10,4)                                           2% (15,4)
+  2% (10,3)                                           2% (15,7)
+  2% (10,5)                                           1% (15,2)
+  1% (10,7)                                           1% (15,5)
+  1% (10,8)                                           1% (15,6)
+                                                      1% (15,8)
+ 86% (15,10)                                         
+  6% (15,5)                                          95% (20,10)
+  4% (15,4)                                           2% (20,5)
+  2% (15,6)                                           1% (20,3)
+  2% (15,7)                                           1% (20,7)
+                                                      1% (20,8)
+ 86% (20,10)                                         
+  5% (20,4)                                          95% (25,10)
+  3% (20,6)                                           2% (25,2)
+  2% (20,7)                                           2% (25,7)
+  1% (20,2)                                           1% (25,5)
+  1% (20,3)
+  1% (20,5)
+  1% (20,9)
+ 
+ 87% (25,10)
+  5% (25,3)
+  4% (25,6)
+  2% (25,5)
+  1% (25,2)
+  1% (25,4)
+
+asserted for error if round2 isn't proposing the same value and no error
+85% (5,10)
+ 5% (5,0)
+ 5% (5,6)
+ 2% (5,3)
+ 1% (5,2)
+ 1% (5,5)
+ 1% (5,7)
+
+CONCLUSION => only delays by one round, because coin flip does write to decision in round 1 then in round 3 it is taken as the new decision to propose
+                a lot of liveness bugs are not distinguishable unless there is no termination at all
+                                             
+
+TODO: maybe collect/monitor by partition of parties
+===================================================
+
+ideal functionaliy ?
+====================
+N = 10
+5 get T and 5 get F
+6 > N+t/2 = 11/2 = 5
+N-t = 9
+in 9 you can get 5 of one and 4 of other ==> (2,*)
+     flip coin and maybe you get better ratio
+     ==> no way to get (2,D) here
+==> can decide either one
+
+6 get T and 4 get F
+in 9 you can get 5 of one and 4 of other ==> (2,*) 
+     you can get 6 of one and 3 of other ==> (2,D)
+  ==> people can only send (2,T) if at all
+      can never send (2,F) so can never decide on F in this round
+      
+7 get T and 3 get F
+in 9 you can get 7 and 2
+                 6 and 3  ==> always (2,D) ==> always decide 
+
+
+prop_uBenOrSucceed: designed to optimize success: deliver all messages in a round but (shuffle Ones) then (shuffleTwos)                                             
+    for r in [5,10,15,20,25]:
+        readableParties 10 10
+        crupt = []
+        Z: benOrEnvAllHonestShuffle
+        prot: Correct State     <<<<<<<<<<<<                      NoState
+
+    +++ OK, passed 100 tests:                                     +++ OK, passed 100 tests:
+    85% (5,10)                                                    91% (5,10)
+    13% (5,0)                                                      7% (5,0)
+     1% (5,5)                                                      1% (5,3)
+     1% (5,7)                                                      1% (5,4)
+                                                                  
+    84% (10,10)                                                   81% (10,10)
+    10% (10,0)                                                    16% (10,0)
+     3% (10,6)                                                     1% (10,3)
+     2% (10,3)                                                     1% (10,4)
+     1% (10,7)                                                     1% (10,5)
+                                                                  
+    81% (15,10)                                                   83% (15,10)
+    12% (15,0)                                                     9% (15,0)
+     2% (15,4)                                                     2% (15,6)
+     2% (15,6)                                                     2% (15,7)
+     1% (15,3)                                                     1% (15,3)
+     1% (15,5)                                                     1% (15,4)
+     1% (15,8)                                                     1% (15,5)
+                                                                   1% (15,8)
+    82% (20,10)                                                   
+    16% (20,0)                                                    84% (20,10)
+     1% (20,4)                                                    11% (20,0)
+     1% (20,6)                                                     3% (20,5)
+                                                                   2% (20,8)
+    78% (25,10)                                                   
+    18% (25,0)                                                    82% (25,10)
+     2% (25,3)                                                    16% (25,0)
+     1% (25,5)                                                     2% (25,6)
+     1% (25,7)
+
+Thoughts:
+    -- success percentages are similar in both cases ; 0 decide probabilities also the same ; no clear trend
+    -- maybe just need more test cases
+
+
+   prot: all small thresholds                                  correct
+
+    fails assert $ (Set.size o < 2)                         85% (5,10)
+                                                            10% (5,0)
+                                                             2% (5,4)
+                                                             1% (5,5)
+                                                             1% (5,6)
+                                                             1% (5,8)
+                                                            
+                                                            91% (10,10)
+                                                             8% (10,0)
+                                                             1% (10,6)
+                                                            
+                                                            83% (15,10)
+                                                            13% (15,0)
+                                                             2% (15,5)
+                                                             1% (15,6)
+                                                             1% (15,7)
+                                                            
+                                                            83% (20,10)
+                                                            13% (20,0)
+                                                             2% (20,5)
+                                                             1% (20,3)
+                                                             1% (20,4)
+                                                            
+                                                            80% (25,10)
+                                                            14% (25,0)
+                                                             3% (25,6)
+                                                             1% (25,4)
+                                                             1% (25,5)
+                                                             1% (25,8)
+
+
+-- interesting it fails in this simple case too
+
+what can the simulator give us additionally when it comes to finding bugs?
+==========================================================================
+At first thought it seems clear that if the simulator is running the broken real world protocol in the a sandbox that it will be able to successfully simulate as long as there is no safety violation. Everything else, including deliver of decisions with arbitrary delay, can be simulated as long as there is no force of delivery in one world and there is in the other. 
+In BenOr, if you give n import and that only results in n/2 parties decising some value in the real world then in the ideal world the simulator must also only observe that many parties completing. Once out of import, the simulator can no longer delay message delivering in queue and MakeProgress commands by Z will eventually force progress in the ideal world. In such a case, the simulator is activated every time MakeProgress is called and eventually there may be a point at which the real world still doesn't deliver anything but the ideal world is forced to deliver the decision. If parties all spend 1 unit of import to schedule a message in the queue, then   
+
+
+how does eventual delivery actually work in the wrapper model?
+--------------------------------------------------------------
+the simulator gets as much importy as the honest parties
+honest parties schedule n messages and this gives the simulator n import and adds n delay to the queue
+when a code block is delivered in the real world it is delivered in the simulatio
+in the case of BenOr
+    -- the environment in the real world keeps calling make progress and this makes messages execute in the real world and the simulator can simualte them as well. At some point the import is exhausted in the real world (the parties are out of import and can't send any more messages)
+
+1. n messages in the real world and party A outputs on the nth message
+--> n delay in the wrapper, n import given to the simulator
+2. Z makes n+1 MakeProgress calls
+    --> in the real world the first of the n messages is delivered
+    --> the delay also runs out in the ideal world and then the simulator uses 1 import to delay it further
+3. the real world wrapper has no delay any more so every call to MakeProgress executes another of the n messages
+    --> eventually n-1 MakeProgress calls are made and the simulator uses its n-1 import to delay until the nth message in the real world outputs something and the simualtor allows it to be output in the ideal world as well
+
+
+
+properties
+==========
+-- decide in 1 round if everyone suggests one value
+-- everyone decides the same value
+-- if some party decides in round r then all parties decide by r+1
+
+
+environment strats
+==================
+-- partition inputs randomly or always give 1/2 and 1/2
+-- only deliver messages per partiton
+    --> give the rest at the end of the round
+    --> arbitrary delay on the messages
+-- deiver messages by arbitrary partition
+    --> give the rest at the end of the round
+    --> arbitrary delay
+-- deliver all messages in just some random order
+-- some subset execute the full round and then the rest
+    * specifically some subset the size of an important threshold
+    -- do arbitrarily for every stage of a round
+
+
+benOrEnvRandomRound
+-- randomly chooses party inputs but no partition information
+-- creates a pair of parties to censor
+-- in 50 rounds:
+    > for all crupt: generate 10 messages with arb round number in [r-2, r-1, r, r+1, r+2] for all parties
+    > randomly choose a threshold `f` for [ (3, rqDeliverChoice c f), (1, rqDeliverAll c) ] exclude censored
+    > flip a coin: deliver messages between censored parties
+
+benOrEnvByPartition
+-- create a partition (pT, pF) for T/F input
+-- in r rounds:
+    > give pT One(T) / pF One(F)
+    > for p in a partition: give p One(arbitrary)
+    > for crupts: generate One(arbitrary)
+    > deliver all One(*)
+    > give pT TwoD(T) and Twos / pf TwoD(F) and Twos
+    > for crupts: generate Two()
+    > for crupts: generate TwoD(*)
+    > for p in a partition: give p TwoD(arbitrary)
+    > deliver all Two() and TwoD(*)
+
+benOrEnvAllHonestShuffle 
+-- ASSUME: 10 parties
+-- create size 5 partition pF and pT (1/2)
+-- in r rounds:
+    > deliver all One(*) in random order
+    > deliver all Two() and TwoD(*) in random order
+    > if all parties output some value: break loop
+-- return last round a party decided in 
+
+
+
+checking round of deliver
+-- parties deliver first and then send next round's One messages
+-- if all environment stops on decide and all parties decide then for each p:
+    * if we should see some parties decide and have messages for r+1 and r+2
+    * the rest shoud have messages for r+2
+-- environment can fork a process that reads lastOut after every 2 message and determines what round a party decided

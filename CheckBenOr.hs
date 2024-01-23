@@ -37,27 +37,31 @@ data BenOrCmd = CmdBenOrP2F PID Bool | CmdOne SID PID Int Bool MulticastTokens |
 type BenOrInput = (BenOrCmd, Tokens)
 type BenOrConfig = (SID, [PID], CruptList, Int)
 
--- TODO: here the integer here is the round number. Therefore we need to parameterize this with a range or rounds. Maybe this way we an see if it reaches consensus or there's a better way to give round numbers and iteratively increase the possible round numbers. 
+{-  set of party outputs from transcript (pid, decision) -}
+getOutputs :: (MonadIO m) => BenOrTranscript -> m (Set (PID, Bool))
+getOutputs tr = do
+  s <- newIORef Set.empty
+  forMseq_ tr $ \t -> do
+    case t of
+      Right (pid, BenOrF2P_Deliver m) -> modifyIORef s $ Set.insert (pid,m)
+      _ -> return ()
+  readIORef s
 
-{- In BenOr the ssids only need to be difference because the round number isn't encoded in them.
-  therefore we can jut generate random ssid numbers for each message without caring too much about it -}
-benOrGenerator :: Int -> Int -> (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [Either BenOrInput AsyncInput]
-benOrGenerator n numQueue ssid parties inputs round dts = frequency $
-    [ (1, return []), 
-      (10, if n==0 then return []
-           else if numQueue==0 then (benOrGenerator n 0 ssid parties inputs round dts)
-           else (:) <$> (choose (0,numQueue-1) >>= \i -> return (Right (CmdDeliver i, 0))) <*> (benOrGenerator (n-1) (numQueue-1) ssid parties inputs round dts)),
-      (5, if n==0 then return [] else (:) <$> 
-          ((shuffle parties) >>= (\party -> oneof inputs >>= (\inp -> (choose (0, 999999) :: Gen Int) >>= (\sid -> 
-            return (Left (CmdOne (ssid (show sid)) (party !! 0) round inp dts, 0)))))) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)),
-      (5, if n==0 then return [] else (:) <$>
-          ((shuffle parties) >>= (\party -> (choose (0, 999999) :: Gen Int) >>= (\sid -> 
-            return (Left (CmdTwo (ssid (show sid)) (party !! 0) round 0, 0))))) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)),
-      (5, if n==0 then return [] else (:) <$>
-          ((shuffle parties) >>= (\party -> oneof inputs >>= (\inp -> (choose (0, 999999) :: Gen Int) >>= (\sid -> 
-            return (Left (CmdTwoD (ssid (show sid)) (party !! 0) round inp 0, 0)))))) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)) 
-    ]
+{- numebr of parties that output a decision -}
+numOutputs :: (MonadIO m) => BenOrTranscript -> m Int
+numOutputs tr = do
+  s <- getOutputs tr
+  return (Set.size s)
 
+{- number of different values parties output -}
+retValues :: (MonadIO m) => BenOrTranscript -> m Int
+retValues tr = do
+  s <- getOutputs tr
+  n <- newIORef Set.empty
+  forMseq_ (Set.toList s) $ \(p,o) -> modifyIORef n $ Set.insert o
+  readIORef n >>= return . Set.size
+
+-- generate messages of a specific type
 benOrOneMsg :: (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen BenOrInput
 benOrOneMsg ssid parties inputs round dts = do
   shuffle parties >>= \pl -> oneof inputs >>= \i -> (choose (0, 999999) :: Gen Int) >>= \sid -> return (CmdOne (ssid (show sid)) (pl !! 0) round i dts, 0)
@@ -69,6 +73,35 @@ benOrTwoMsg ssid parties round dts = do
 benOrTwoDMsg :: (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen BenOrInput
 benOrTwoDMsg ssid parties inputs round dts =
   shuffle parties >>= \pl -> oneof inputs >>= \i -> (choose (0, 999999) :: Gen Int) >>= \sid -> return (CmdTwoD (ssid (show sid)) (pl !! 0) round i dts, 0)
+
+-- When testing liveness in the optimistic case we're lookin for protocol design errors
+-- and we want to ensure that all messages are delivered. Failures in liveness here indicate
+-- problems even in the crash fault setting. The only difference in this generator is that it
+-- creates no DELIVER messages for the runqueue.
+benOrGeneratorOnlyMsgs :: Int -> Int -> (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [BenOrInput]
+benOrGeneratorOnlyMsgs n numQueue ssid parties inputs round dts = frequency $
+  [ (1, return []), 
+    (5, if n==0 then return [] else (:) <$> (benOrOneMsg ssid parties inputs round dts) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts)),
+    (5, if n==0 then return [] else (:) <$> (benOrTwoMsg ssid parties round dts) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts)),
+    (5, if n==0 then return [] else (:) <$> (benOrTwoDMsg ssid parties inputs round dts) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts))
+  ]
+
+-- TODO: here the integer here is the round number. Therefore we need to parameterize this with a range or rounds. Maybe this way we an see if it reaches consensus or there's a better way to give round numbers and iteratively increase the possible round numbers. 
+
+{- In BenOr the ssids only need to be difference because the round number isn't encoded in them.
+  therefore we can jut generate random ssid numbers for each message without caring too much about it -}
+benOrGenerator :: Int -> Int -> (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [Either BenOrInput AsyncInput]
+benOrGenerator n numQueue ssid parties inputs round dts = frequency $
+    [ (1, return []), 
+      (10, if n==0 then return []
+           else if numQueue==0 then (benOrGenerator n 0 ssid parties inputs round dts)
+           else (:) <$> (choose (0,numQueue-1) >>= \i -> return (Right (CmdDeliver i, 0))) <*> (benOrGenerator (n-1) (numQueue-1) ssid parties inputs round dts)),
+      (5, if n==0 then return [] else (:) <$> ((benOrOneMsg ssid parties inputs round dts) >>= return . Left) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)),
+      (5, if n==0 then return [] else (:) <$> ((benOrTwoMsg ssid parties round dts) >>= return . Left) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts)),
+      (5, if n==0 then return [] else (:) <$> ((benOrTwoDMsg ssid parties inputs round dts) >>= return . Left) <*> (benOrGenerator (n-1) numQueue ssid parties inputs round dts))
+    ]
+
+
   
 -- Takes in a BenOrCmd and executes it by writing the actual message on the channel
 -- makes it easy to create an environment that takes in a tape of commands and executes
@@ -102,7 +135,7 @@ performBenOrEnv
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) Transcript m)
+     (ClockZ2F) BenOrTranscript m)
 performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
     let (sid :: SID, parties :: [PID], crupt :: Map PID (), t :: Int) = benOrConfig 
     writeChan z2exec $ SttCrupt_SidCrupt sid crupt
@@ -120,7 +153,6 @@ performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump
     writeChan outp =<< readIORef transcript
 
 
-
 -- The purpose of this generator is to test whether asynchrnous conditions and byzantine adversaries
 -- can cause parties to decide on different values. The environment:
 -- * stays within the n/5 corruption bound
@@ -133,7 +165,7 @@ performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump
 --     pre $ (Set.size o > 1)
 -- to toss out uninteresting cases and subsequently assert
 --     assert (Set.size o == 5)
-propUEnvBenOrSafety
+benOrEnvRandomRounds
   :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
@@ -141,8 +173,8 @@ propUEnvBenOrSafety
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript) m
-propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript) m
+benOrEnvRandomRounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   liftIO $ putStrLn $ "Parties: " ++ show parties 
   liftIO $ putStrLn $ "Crupt: " ++ show crupts
@@ -163,7 +195,7 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
                           One r b -> (1,r,b)
                           Two r -> (2,r,False)
                           TwoD r b -> (3,r,b)  
-  --(deliverer,deliverByPairs,getByPairs,getBySender,getByReceiver) <- envMapQueue z2a a2z clockChan lastOut pump 
+  
   (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter cmdList
 
   () <- readChan pump
@@ -176,8 +208,6 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   let inputTokens = importAmt
   
   -- HONEST INPUT --
-  --subHonest <- liftIO $ generate $ sublistOf honest
-  --forMseq_ (subHonest) $ \h -> do
   forMseq_ (honest) $ \h -> do
     -- choose a boolean
     x <- liftIO $ generate chooseAny
@@ -185,13 +215,9 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
     writeChan z2p $ (h, ((ClockP2F_Through $ BenOrP2F_Input x), SendTokens inputTokens))
     readChan pump
 
-  liftIO $ putStrLn $ "\n honest input done \n" 
-  
   -- generate a censor list 
-  --someHonest <- liftIO $ generate $ elements honest
-  --censorPairs <- liftIO $ generate $ shuffle [(x,y) | (x:ys) <- tails honest, y <- ys, x == someHonest || y == someHonest] 
-  let censorPairs = [("Bob","Bob"), ("Carol","Carol"), ("Dave","Dave"), ("Eve","Eve"), ("Frank","Frank")]
-  --let censorPairs = take 1 pairsOfPIDs
+  someHonest <- liftIO $ generate $ elements honest
+  censorPairs <- liftIO $ generate $ shuffle [(x,y) | (x:ys) <- tails honest, y <- ys, x == someHonest || y == someHonest] 
 
   -- Make the protocol run --
   firstInp <- newIORef []
@@ -201,7 +227,6 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
 
     forMseq_ crupts $ \cpid -> do
       -- ADV INPUT with only some delivers (not all messages) --
-      --inps <- liftIO $ generate $ benOrGeneratorOnlyMsgs 30 c (multicastSid sssid cpid parties) ["Bob"] inputs r inputTokens
       forMseq_ [1..10] $ \idx -> do
         rprime <- liftIO $ generate $ elements [r-2,r-1,r,r+1,r+2]
         inps <- liftIO $ generate $ benOrGeneratorOnlyMsgs 1 c (multicastSid sssid cpid parties) ["Dave"] inputs rprime inputTokens
@@ -216,12 +241,11 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
 
     f <- liftIO $ generate $ arbitrary `suchThat` (> 1)
     inps <- liftIO $ generate $ frequency [ (3, rqDeliverChoice c f), (1, rqDeliverAll c) ]
-    --inps <- liftIO $ generate $ rqDeliverAll c
     forMseq_ inps $ \inp -> do
       modifyIORef cmdList $ (++ [Right (inp,0)])
-      --envExecAsyncCmd z2p z2a z2f clockChan pump (inp,0)
       deliverer censorPairs inp
 
+    -- sometimes deliver all the messages between the censored parties
     b :: Int <- liftIO $ generate $ choose (1,5) 
     if b < 3 then do
       () <- deliverByPairs censorPairs
@@ -238,61 +262,39 @@ propUEnvBenOrSafety parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr)
 
 -- A property that asserts safety holds
-prop_uBenOrSafety one two dec stat rnd = monadicIO $ do
-    --forAllM ( suchThat (partiesBetween 10 15) nonZeroParties) $ \ps -> do
+propBenOrSafety one two dec stat rnd = monadicIO $ do
     forAllM (readableParties 10 15) $ \ps -> do
       let t = (length ps `div` 5) - 1
       forAllM (cruptFrom ps t) $ \cc -> do
         let parties = ps
-        --let parties = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
         let prot () = protBenOrBreak one two dec 0 stat rnd
         let crupt = cc
-        --let crupt = ["A"]
-        (config', c', t', inps, tape) <- run $ runITMinIO 120 $ execUC 
-          (propUEnvBenOrPartition parties crupt 1000)
+        (config', c', t', inps, tape, outputRounds) <- run $ runITMinIO 120 $ execUC 
+          (benOrEnvByPartition parties crupt 1000)
           (runAsyncP $ prot ()) 
           (runAsyncF $ bangFAsync fMulticastToken) 
           dummyAdversaryToken
-        outputs <- newIORef Set.empty
-        forMseq_ [0..(length t')-1] $ \i -> do
-            case (t' !! i) of 
-                Right (pid, BenOrF2P_Deliver m) -> do
-                    liftIO $ putStrLn $ "\n\t ############### GOT SOME output " ++ show (t' !! i) ++ "\n"
-                    modifyIORef outputs $ Set.insert m
-                _ -> return ()
-        o <- readIORef outputs
         --printYellow ("[Config]\n\n" ++ show config')
         --printYellow ("[Inputs]\n\n" ++ show c')
-        pre $ (Set.size o) > 0
-        printYellow (show tape)
-        assert $ (Set.size o) < 2
+        n <- retValues t' 
+        pre $ n > 0
+        --printYellow (show tape)
+        printYellow (show outputRounds)
+        --assert False
+        let maxRound = foldr1 (\x y -> if x >= y then x else y) $ map snd $ Map.toList outputRounds
+        let minRound = foldr1 (\x y -> if x <= y then x else y) $ map snd $ Map.toList outputRounds
+        assert $ (maxRound - minRound) <= 1
+        --assert $ n < 2
 
--- Here we create properties that run the BenOr protocol with different variants of
--- the threshold parameters the protocol uses. We expect CCC (all correct) never results
--- in safety violations where as certain combinations of small values can violate safety.
-prop_uBenOrSafetyCCC = prop_uBenOrSafety BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetyCCS = prop_uBenOrSafety BenOrOneCorrect BenOrTwoDCorrect BenOrDecideSmall   CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetyCSC = prop_uBenOrSafety BenOrOneCorrect BenOrTwoDSmall BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetyCSS = prop_uBenOrSafety BenOrOneCorrect BenOrTwoDSmall BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetySCC = prop_uBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetySCS = prop_uBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetySSC = prop_uBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideCorrect     CorrectState BenOrCheckRounds_Check
-prop_uBenOrSafetySSS = prop_uBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideSmall       CorrectState BenOrCheckRounds_Check
-
-
--- This environment does cause a safety violation with ONLY threshold perturbations
--- It is more involved in that it separates messages out.
--- TODO: can we make this a smaller environment?
-propUEnvBenOrPartition
-  :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
+benOrEnvTrackDecideRound :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
                   (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool, [[Char]]) m
-propUEnvBenOrPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool, [[Char]], Map PID Int) m
+benOrEnvTrackDecideRound parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   liftIO $ putStrLn $ "Parties: " ++ show parties 
   liftIO $ putStrLn $ "Crupt: " ++ show crupts
@@ -358,9 +360,6 @@ propUEnvBenOrPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2
 
   pidsT <- selectPIDs honest
   let pidsF = honest \\ pidsT
-  --let pidsT = ["B", "C", "D", "E"]
-  --let pidsF = ["F", "G", "H", "I", "J"]
- 
   let ptm = map (\x -> (x,True)) pidsT
   let pfm = map (\x -> (x,False)) pidsF
   let inputM = Map.fromList (ptm ++ pfm)
@@ -370,147 +369,112 @@ propUEnvBenOrPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2
     writeChan z2p $ (p, ((ClockP2F_Through $ BenOrP2F_Input i), SendTokens inputTokens))
     readChan pump
 
-  ---- partition 1 messages by input
-  --c <- envQueueSize z2a clockChan 0
-  --oneToT <- intersectM (oneTrue 1) (getByReceivers pidsT)
-  --oneToF <- intersectM (oneFalse 1) (getByReceivers pidsF)
-  --doDelivers $ oneToT ++ oneToF
-
-  --yprint "\t\t\t\t T shoul have 4 and F should have 5"
-
-  --forMseq_ pidsT $ \p -> do
-  --  oneFtoP <- intersectM (oneFalse 1) (getByReceivers [p])
-  --  doDelivers $ take 3 oneFtoP
-  --  forMseq_ crupts $ \cpid -> do
-  --    cinp <- generateM $ vectorOf 5 $ benOrOneMsg (multicastSid sssid cpid parties) [p] [return True] 1 inputTokens  
-  --    doCmds (map Left cinp)
-
-  ---- adv (1,1,T) to pidsT
-
-  --forMseq_ pidsF $ \p -> do
-  --  oneTtoP <- intersectM (oneTrue 1) (getByReceivers [p])
-  --  doDelivers $ take 3 oneTtoP
-
-  --yprint "they should all be expecting 2 messages"
-
-  --twoDToT <- intersectM (twoDTrue 1) (getByReceivers pidsT)
-  --twoDToF <- intersectM (twoDFalse 1) (getByReceivers pidsF)
-  --doDelivers $ twoDToT ++ twoDToF
-
-  --yprint "\t\t\t\t\t T shoud have 4 and F should have 5"  
- 
-  --forMseq_ pidsT $ \p -> do
-  --  twoFtoP <- intersectM (twoDFalse 1) (getByReceivers [p])
-  --  doDelivers $ take 3 twoFtoP
-  --  forMseq_ crupts $ \cpid -> do
-  --    cinp <- generateM $ vectorOf 5 $ benOrTwoDMsg (multicastSid sssid cpid parties) [p] [return True] 1 inputTokens  
-  --    doCmds (map Left cinp)
-
-  --forMseq_ pidsF $ \p -> do
-  --  twoTtoP <- intersectM (twoDTrue 1) (getByReceivers [p])
-  --  doDelivers $ take 3 twoTtoP
+  checkChan <- newChan
+  doneCheckChan <- newChan
+  partyOutputRounds <- newIORef (Map.empty :: Map PID Int)
+  -- track decision round
+  fork $ forever $ do
+    () <- readChan checkChan
+    -- if there is a decide, the last out is always 
+    lo <- readIORef lastOut
+    case lo of
+      Just (Right (pid, BenOrF2P_Deliver b)) -> do
+        exists <- readIORef partyOutputRounds >>= return . (Map.member pid)
+        if not exists then do
+          -- get leaks
+          leaks <- getLeaks
+          lastRound <- newIORef 0
+          -- search for last round number in messages sent by pid
+          forMseq_ leaks $ \l -> do
+            let (sid :: SID, ((bm :: BenOrMsg, DeliverTokensWithMessage st), SendTokens a)) = l
+            let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "" $ snd sid
+            let r' = if pidS == pid then
+                       case bm of
+                         One r b -> (r-1)
+                         Two r -> (r-1)
+                         TwoD r b -> (r-1)
+                     else 0
+            writeIORef lastRound r'
+          readIORef lastRound >>= modifyIORef partyOutputRounds . Map.insert pid
+        else return () 
+      Just _ -> return ()
+      Nothing -> return ()
+    writeChan doneCheckChan ()
   
---------------
+  let doDeliversWithCheck ds = do
+            forMseq_ (deliverListAll ds) $ \i -> do
+              deliverer [] i
+              writeChan checkChan ()
+              readChan doneCheckChan
  
-  let rounds = 5
+  let rounds = 5 
   forMseq_ [1..rounds] $ \r -> do
-    yprint ("\t\t\t round: " ++ show r ++ " giving ones by partition")
-    -- give ones by partition
-    takeAction ("intersectM (oneTrue " ++ show r ++ ") (getByReceivers pidsT)")
-    takeAction ("intersectM (oneFalse " ++ show r ++ ") (getByReceivers pidsF)")
-    oneToT <- intersectM (oneTrue r) (getByReceivers pidsT)
-    oneToF <- intersectM (oneFalse r) (getByReceivers pidsF)
-    doDelivers $ oneToT ++ oneToF
+    -- deliver all Ones in some random order
+    ones <- shuffleM (allOnes r)
+    doDelivers ones
 
-    -- deliver more 1's for some partition with random values
-    partition <- selectPIDs honest
-    forMseq_ partition $ \p -> do
-      forp <- getByReceivers [p]
-      (b', ones) <- getOneByArb r
-      liftIO $ putStrLn $ "\t\t\t\t deliver " ++ show ones ++ " to " ++ show p
-      takeAction ("Party " ++ show p ++ ": (" ++ show b' ++ ", ones) <- getOneByArb " ++ show r)
-      doDelivers (intersect ones forp)
+    -- deliver all Two
+    twos <- shuffleM $ concatM [(allTwos r), (allTwoDs r)]
+    doDeliversWithCheck twos
 
-    -- send adv 1's
-    cinps <- newIORef []
-    forMseq_ crupts $ \cpid -> do
-      someInput <- generateM arbitrary
-      cinp <- generateM $ vectorOf 5 $ benOrOneMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
-      forMseq_ cinp $ takeAction . show
-      modifyIORef cinps $ (++ (map Left cinp))
-    cinpCmds <- readIORef cinps
-    doCmds cinpCmds
-
-    yprint ("\tt give the rest of the 1s")
-    finalSet <- allOnes r
-    takeAction ("allOnes " ++ show r)
-    doDelivers finalSet
-
-    yprint ("\t\t deliver 2's by partition")
-
-      -- deliver 2's by partition
-    twoToT <- intersectM (twoTrue r) (getByReceivers pidsT)
-    takeAction ("intersectM (twoTrue " ++ show r ++ ") (getByReceivers pidsT)")
-    takeAction ("intersectM (twoDTrue " ++ show r ++ ") (getByReceivers pidsT)")
-    takeAction ("intersectM (twoFalse " ++ show r ++ ") (getByReceivers pidsF)")
-    takeAction ("intersectM (twoDFalse " ++ show r ++ ") (getByReceivers pidsF)")
-    twoDToT <- intersectM (twoDTrue r) (getByReceivers pidsT)
-    twoToF <- intersectM (twoFalse r) (getByReceivers pidsF)  
-    twoDToF <- intersectM (twoDFalse r) (getByReceivers pidsF)
-    doDelivers $ twoToT ++ twoDToT ++ twoToF ++ twoDToF 
-
-    -- adv 2's or 2D's   
-    cinps <- newIORef []
-    forMseq_ crupts $ \cpid -> do
-      cinp <- generateM $ vectorOf 5 $ benOrTwoMsg (multicastSid sssid cpid parties) honest r inputTokens  
-      modifyIORef cinps $ (++ (map Left cinp))
-      forMseq_ cinp $ takeAction . show
-    cinpCmds <- readIORef cinps
-    doCmds cinpCmds
-
-    -- adv 2's or 2D's   
-    cinps <- newIORef []
-    forMseq_ crupts $ \cpid -> do
-      someInput <- generateM arbitrary
-      cinp <- generateM $ vectorOf 5 $ benOrTwoDMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
-      modifyIORef cinps $ (++ (map Left cinp))
-      forMseq_ cinp $ takeAction . show
-    cinpCmds <- readIORef cinps
-    doCmds cinpCmds
- 
-    -- select somesubset other twos 
-    partition <- selectPIDs honest
-    forMseq_ partition $ \p -> do
-      forp <- getByReceivers [p]
-      twos <- getTwoByArb r
-      (b', twoDs) <- getTwoDByArb r
-      takeAction ("Party " ++ show p ++ "(" ++ show b' ++ ", twoDs) <- getTwoDByArb " ++ show r)
-      doDelivers (intersect (twos ++ twoDs) forp)
-
-    yprint ("\t\t deliver rest of the pending")
-
-    -- deliver rest of 2's and 2D's and 1's
-    finalSet <- concatM [allTwos r, allTwoDs r]
-    takeAction ("concatM [allTwos " ++ show r ++ ", allTwoDs " ++ show r ++ "]")
-    doDelivers finalSet 
- 
   tr <- readIORef transcript
   cl <- readIORef cmdList
   ac <- readIORef actionTape
+  po <- readIORef partyOutputRounds
 
-  writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr, inputM, ac)
+  writeChan outp ((sid, parties, (Map.empty), t), cl, tr, inputM, ac, po)
+            
 
 
-benOrEnvAllHonestShuffle
-  :: (MonadEnvironment m) => Int -> [PID] -> [PID] -> Int ->
+-- a theorem of the paper is that:
+--    * if some part decides in round r all others decide in the next round
+--    * if all parties propose the same value, they all decide in round 1
+propBenOrFinishNextRound one two dec stat rnd = monadicIO $ do
+  forAllM (readableParties 10 15) $ \parties -> do
+    let t = (length parties `div` 5) - 1
+    forAllM (cruptFrom parties t) $ \crupt -> do
+      let prot () = protBenOrBreak one two dec 0 stat rnd
+      (config', c', t', inps, tape, outputRounds) <- run $ runITMinIO 120 $ execUC
+        (benOrEnvTrackDecideRound parties crupt 1000)
+        (runAsyncP $ prot ())
+        (runAsyncF $ bangFAsync fMulticastToken)
+        dummyAdversaryToken
+      n <- retValues t' 
+      pre $ n > 0
+      --printYellow (show tape)
+      printYellow (show outputRounds)
+      assert False
+      assert $ n < 2
+
+propBenOrFinishNextRoundCCC = propBenOrFinishNextRound BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect CorrectState BenOrCheckRounds_Check
+    
+
+-- Here we create properties that run the BenOr protocol with different variants of
+-- the threshold parameters the protocol uses. We expect CCC (all correct) never results
+-- in safety violations where as certain combinations of small values can violate safety.
+propBenOrSafetyCCC = propBenOrSafety BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect CorrectState BenOrCheckRounds_Check
+propBenOrSafetyCCS = propBenOrSafety BenOrOneCorrect BenOrTwoDCorrect BenOrDecideSmall   CorrectState BenOrCheckRounds_Check
+propBenOrSafetyCSC = propBenOrSafety BenOrOneCorrect BenOrTwoDSmall BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
+propBenOrSafetyCSS = propBenOrSafety BenOrOneCorrect BenOrTwoDSmall BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
+propBenOrSafetySCC = propBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
+propBenOrSafetySCS = propBenOrSafety BenOrOneSmall BenOrTwoDCorrect BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
+propBenOrSafetySSC = propBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideCorrect     CorrectState BenOrCheckRounds_Check
+propBenOrSafetySSS = propBenOrSafety BenOrOneSmall BenOrTwoDSmall BenOrDecideSmall       NoState BenOrCheckRounds_Check
+
+
+-- This environment does cause a safety violation with ONLY threshold perturbations
+-- It is more involved in that it separates messages out.
+-- TODO: can we make this a smaller environment?
+benOrEnvByPartition
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
                   (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool, [[Char]], Int) m
-benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool, [[Char]], Map PID Int) m
+benOrEnvByPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   liftIO $ putStrLn $ "Parties: " ++ show parties 
   liftIO $ putStrLn $ "Crupt: " ++ show crupts
@@ -525,6 +489,231 @@ benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z,
  
   let cruptMapList = map (\x -> (x,())) crupts
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
+  
+  cmdList <- newIORef []  
+  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+
+  let valueFilter msg = case msg of
+                          One r b -> (1,r,b)
+                          Two r -> (2,r,False)
+                          TwoD r b -> (3,r,b)  
+
+  (deliverer, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter cmdList
+
+  let allOnes r = do getByFilter (1,r,True) >>= \x -> getByFilter (1,r,False) >>= \y -> return (x ++ y)
+  let allTwos r = getByFilter (2,r,False)
+  let allTwoDs r = do getByFilter (3,r,True) >>= \x -> getByFilter (3,r,False) >>= \y -> return (x ++ y)
+  let oneTrue r = do getByFilter (1,r,True)
+  let oneFalse r = do getByFilter (1,r,False)
+  let twoTrue r = do getByFilter (2,r,True)
+  let twoFalse r = do getByFilter (2,r,False)
+  let twoDTrue r = do getByFilter (3,r,True)
+  let twoDFalse r = do getByFilter (3,r,False)
+  let doDelivers ds = do
+            forMseq_ (deliverListAll ds) $ \i -> do
+              deliverer [] i
+  let doCmds cmds = do
+      forMseq_ cmds $ \cmd -> envExecCmd z2p z2a z2f clockChan pump cmd envExecBenOrCmd 
+  let getOneByArb r = do
+            whichInp <- generateM arbitrary
+            idxs <- getByFilter (1,r,whichInp)
+            return (whichInp, idxs)
+  let getTwoByArb r = do
+            idxs <- getByFilter (2,r,False)
+            return idxs
+  let getTwoDByArb r = do
+            whichInp <- generateM arbitrary
+            idxs <- getByFilter (3,r,whichInp)
+            return (whichInp, idxs)
+
+  () <- readChan pump
+  modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
+  
+  c <- envQueueSize z2a clockChan 1000
+  
+  --let inputs = do [return True, return False]
+ 
+  let inputTokens = importAmt
+  
+  actionTape <- newIORef []
+  let takeAction s = do modifyIORef actionTape (++ [s])
+
+  pidsT <- selectPIDs honest
+  let pidsF = honest \\ pidsT
+  
+  let ptm = map (\x -> (x,True)) pidsT
+  let pfm = map (\x -> (x,False)) pidsF
+  let inputM = Map.fromList (ptm ++ pfm)
+
+  forMseq_ (ptm ++ pfm) $ \(p,i) -> do
+    takeAction (show p ++ " input " ++ show i)
+    writeChan z2p $ (p, ((ClockP2F_Through $ BenOrP2F_Input i), SendTokens inputTokens))
+    readChan pump
+  
+  checkChan <- newChan
+  doneCheckChan <- newChan
+  partyOutputRounds <- newIORef (Map.empty :: Map PID Int)
+  -- track decision round
+  fork $ forever $ do
+    () <- readChan checkChan
+    -- if there is a decide, the last out is always 
+    lo <- readIORef lastOut
+    case lo of
+      Just (Right (pid, BenOrF2P_Deliver b)) -> do
+        exists <- readIORef partyOutputRounds >>= return . (Map.member pid)
+        if not exists then do
+          -- get leaks
+          leaks <- getLeaks
+          lastRound <- newIORef 0
+          -- search for last round number in messages sent by pid
+          forMseq_ leaks $ \l -> do
+            let (sid :: SID, ((bm :: BenOrMsg, DeliverTokensWithMessage st), SendTokens a)) = l
+            let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "" $ snd sid
+            let r' = if pidS == pid then
+                       case bm of
+                         One r b -> (r-1)
+                         Two r -> (r-1)
+                         TwoD r b -> (r-1)
+                     else 0
+            writeIORef lastRound r'
+          readIORef lastRound >>= modifyIORef partyOutputRounds . Map.insert pid
+        else return () 
+      Just _ -> return ()
+      Nothing -> return ()
+    writeChan doneCheckChan ()
+  
+  let doDeliversWithCheck ds = do
+            forMseq_ (deliverListAll ds) $ \i -> do
+              deliverer [] i
+              writeChan checkChan ()
+              readChan doneCheckChan
+
+  let doCmdsWithCheck cmds = do
+      forMseq_ cmds $ \cmd -> do
+        envExecCmd z2p z2a z2f clockChan pump cmd envExecBenOrCmd 
+        writeChan checkChan ()
+        readChan doneCheckChan
+
+  let rounds = 15
+  forMseq_ [1..rounds] $ \r -> do
+    yprint ("\t\t\t round: " ++ show r ++ " giving ones by partition")
+    -- give ones by partition
+    takeAction ("intersectM (oneTrue " ++ show r ++ ") (getByReceivers pidsT)")
+    takeAction ("intersectM (oneFalse " ++ show r ++ ") (getByReceivers pidsF)")
+    oneToT <- intersectM (oneTrue r) (getByReceivers pidsT)
+    oneToF <- intersectM (oneFalse r) (getByReceivers pidsF)
+    doDelivers $ oneToT ++ oneToF
+
+    -- deliver more 1's for some partition with random values
+    partition <- selectPIDs honest
+    forMseq_ partition $ \p -> do
+      forp <- getByReceivers [p]
+      (b', ones) <- getOneByArb r
+      takeAction ("Party " ++ show p ++ ": (" ++ show b' ++ ", ones) <- getOneByArb " ++ show r)
+      doDelivers (intersect ones forp)
+
+    -- send adv 1's with random T/F
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      someInput <- generateM arbitrary
+      cinp <- generateM $ vectorOf 5 $ benOrOneMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
+      forMseq_ cinp $ takeAction . show
+      modifyIORef cinps $ (++ (map Left cinp))
+    cinpCmds <- readIORef cinps
+    doCmds cinpCmds
+
+    yprint ("\tt give the rest of the 1s")
+    -- deliver the rest of the 1 messages in this round
+    finalSet <- allOnes r
+    takeAction ("allOnes " ++ show r)
+    doDelivers finalSet
+
+    yprint ("\t\t deliver 2's by partition")
+
+      -- deliver 2's by partition
+    test <- twoTrue r
+    if test /= [] then error "there should be no (2,r,True)"
+    else return ()
+    twoToT <- intersectM (twoTrue r) (getByReceivers pidsT)
+    takeAction ("intersectM (twoTrue " ++ show r ++ ") (getByReceivers pidsT)")
+    takeAction ("intersectM (twoDTrue " ++ show r ++ ") (getByReceivers pidsT)")
+    takeAction ("intersectM (twoFalse " ++ show r ++ ") (getByReceivers pidsF)")
+    takeAction ("intersectM (twoDFalse " ++ show r ++ ") (getByReceivers pidsF)")
+    twoDToT <- intersectM (twoDTrue r) (getByReceivers pidsT)
+    twoToF <- intersectM (twoFalse r) (getByReceivers pidsF)  
+    twoDToF <- intersectM (twoDFalse r) (getByReceivers pidsF)
+    doDeliversWithCheck $ twoToT ++ twoDToT ++ twoToF ++ twoDToF 
+
+    -- adv 2 messages 
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      cinp <- generateM $ vectorOf 5 $ benOrTwoMsg (multicastSid sssid cpid parties) honest r inputTokens  
+      modifyIORef cinps $ (++ (map Left cinp))
+      forMseq_ cinp $ takeAction . show
+    cinpCmds <- readIORef cinps
+    doCmdsWithCheck cinpCmds
+
+    -- adv 2D messages with arbitrary T/F
+    cinps <- newIORef []
+    forMseq_ crupts $ \cpid -> do
+      someInput <- generateM arbitrary
+      cinp <- generateM $ vectorOf 5 $ benOrTwoDMsg (multicastSid sssid cpid parties) honest [return someInput] r inputTokens  
+      modifyIORef cinps $ (++ (map Left cinp))
+      forMseq_ cinp $ takeAction . show
+    cinpCmds <- readIORef cinps
+    doCmdsWithCheck cinpCmds
+ 
+    -- some subset gets all the 2's for them
+    partition <- selectPIDs honest
+    forMseq_ partition $ \p -> do
+      forp <- getByReceivers [p]
+      twos <- getTwoByArb r
+      (b', twoDs) <- getTwoDByArb r
+      takeAction ("Party " ++ show p ++ "(" ++ show b' ++ ", twoDs) <- getTwoDByArb " ++ show r)
+      doDeliversWithCheck (intersect (twos ++ twoDs) forp)
+
+    yprint ("\t\t deliver rest of the pending")
+    
+    b <- ?getBit
+    if b then do 
+      -- deliver rest of 2's and 2D's
+      finalSet <- concatM [allTwos r, allTwoDs r]
+      takeAction ("concatM [allTwos " ++ show r ++ ", allTwoDs " ++ show r ++ "]")
+      doDeliversWithCheck finalSet 
+      -- all messages of this round should have been delivered by now
+    else return ()
+ 
+  tr <- readIORef transcript
+  cl <- readIORef cmdList
+  ac <- readIORef actionTape
+  po <- readIORef partyOutputRounds
+
+  writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr, inputM, ac, po)
+
+
+benOrEnvAllHonestShuffle
+  :: (MonadEnvironment m) => Int -> [PID] -> [PID] -> Int ->
+  Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
+     (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
+                  (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
+                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
+     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
+                  (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool, [[Char]], Int) m
+benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+  let extendRight conf = show ("", conf)
+  liftIO $ putStrLn $ "Parties: " ++ show parties 
+  liftIO $ putStrLn $ "Crupt: " ++ show crupts
+  let t = ((length parties) `div` 5) - 1
+  let honest = parties
+  let sssid = "sidTestACast"
+  let sid = (sssid, show (parties, t, ""))
+  
+  let yprint s = do liftIO $ putStrLn $ "\t\t\t\t\ESC[32m" ++ show s ++ "\ESC[0m"
+  yprint ("Honest: " ++ show honest)
+  yprint ("Crupt: " ++ show crupts)
+ 
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.empty)
   
   cmdList <- newIORef []  
   (lastOut, transcript, clockChan) <- envReadOut p2z a2z
@@ -594,31 +783,30 @@ benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z,
   --let rounds = 5
   lastRound <- newIORef rounds
   forMseq_ [1..rounds] $ \r -> do
-    nd <- readIORef numDecided
-    if nd < (length honest) then do
-      -- deliver all Ones in some random order
-      ones <- shuffleM (allOnes r)
-      doDelivers ones
+    --nd <- readIORef numDecided
+    --if nd < (length honest) then do
+    -- deliver all Ones in some random order
+    ones <- shuffleM (allOnes r)
+    doDelivers ones
 
-      -- deliver all Two
-      twos <- shuffleM $ concatM [(allTwos r), (allTwoDs r)]
-      doDelivers twos
+    -- deliver all Two
+    twos <- shuffleM $ concatM [(allTwos r), (allTwoDs r)]
+    doDelivers twos
 
-      -- check for outputs
-      ls <- readIORef lastOut
-      case ls of
-        Just (Right (pid, BenOrF2P_Deliver m)) -> modifyIORef numDecided (+ 1)
-        _ -> return ()
-    else do 
-      writeIORef lastRound r 
-      return ()
-
+    --  -- check for outputs
+    --  ls <- readIORef lastOut
+    --  case ls of
+    --    Just (Right (pid, BenOrF2P_Deliver m)) -> modifyIORef numDecided (+ 1)
+    --    _ -> return ()
+    --else do 
+    --  writeIORef lastRound r 
+    --  return ()
   tr <- readIORef transcript
   cl <- readIORef cmdList
   ac <- readIORef actionTape
   lr <- readIORef lastRound
 
-  writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr, inputM, ac, lr)
+  writeChan outp ((sid, parties, (Map.empty), t), cl, tr, inputM, ac, lr)
 
 -- A property that asserts safety holds
 {- 
@@ -626,34 +814,56 @@ benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z,
     --  newRound being called early in isTimeToDecide but this only delays by one round so not a noticeable liveness problem becuase terminaton is still guaranteed
         got some differences but negligible.
 -}
-prop_uBenOrSucceed = monadicIO $ do
-    forMseq_ [5] $ \r -> do
+propBenOrSucceedRound one two decide' state' round' = monadicIO $ do
+    forMseq_ [5,10,15,20] $ \r -> do
       parties <- generateM $ readableParties 10 10
       let t = (length parties `div` 5) - 1
       let crupt = []
-      let prot () = protBenOrBreak BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect 0 CorrectState BenOrCheckRounds_Check
+      --let prot () = protBenOrBreak BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect 0 CorrectState BenOrCheckRounds_Check
+      let prot () = protBenOrBreak one two decide' 0 state' round'
       (config', c', t', inps, tape, lastRound) <- run $ runITMinIO 120 $ execUC 
         (benOrEnvAllHonestShuffle r parties crupt 1000)
         (runAsyncP $ prot ()) 
         (runAsyncF $ bangFAsync fMulticastToken) 
         dummyAdversaryToken
-      outputs <- newIORef Set.empty
-      numOuts <- newIORef 0
-      forMseq_ [0..(length t')-1] $ \i -> do
-          case (t' !! i) of 
-              Right (pid, BenOrF2P_Deliver m) -> do
-                  liftIO $ putStrLn $ "\n\t ############### GOT SOME output " ++ show (t' !! i) ++ "\n"
-                  modifyIORef outputs $ Set.insert m
-                  modifyIORef numOuts (+ 1)
-              _ -> return ()
-      o <- readIORef outputs
-      n <- readIORef numOuts
-      --pre $ (Set.size o) > 0
+      n <- numOutputs t'
+      no <- retValues t'
       printYellow (show tape)
-      assert $ (Set.size o) < 2
+      assert $ no < 2
       monitor (collect (r, n))
 
-prop_benOrSucceedSim = monadicIO $ do
+propBenOrSafetyAllHonestCCC = propBenOrSucceedRound BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestCCS = propBenOrSucceedRound BenOrOneCorrect BenOrTwoDCorrect BenOrDecideSmall   CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestCSC = propBenOrSucceedRound BenOrOneCorrect BenOrTwoDSmall BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestCSS = propBenOrSucceedRound BenOrOneCorrect BenOrTwoDSmall BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestSCC = propBenOrSucceedRound BenOrOneSmall BenOrTwoDCorrect BenOrDecideCorrect   CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestSCS = propBenOrSucceedRound BenOrOneSmall BenOrTwoDCorrect BenOrDecideSmall     CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestSSC = propBenOrSucceedRound BenOrOneSmall BenOrTwoDSmall BenOrDecideCorrect     CorrectState BenOrCheckRounds_Check
+propBenOrSafetyAllHonestSSS = propBenOrSucceedRound BenOrOneSmall BenOrTwoDSmall BenOrDecideSmall       CorrectState BenOrCheckRounds_Check
+
+{- Check when decisions are made -}
+propBenOrAllHonestSuccess = propBenOrSafetyAllHonestCCC
+
+propBenOrSucceedRoundWithCrupt one two decide' state' round' = monadicIO $ do
+    forMseq_ [5,10,15,20] $ \r -> do
+      parties <- generateM $ readableParties 10 10
+      let t = (length parties `div` 5) - 1
+      let crupt = []
+      --let prot () = protBenOrBreak BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect 0 CorrectState BenOrCheckRounds_Check
+      let prot () = protBenOrBreak one two decide' 0 state' round'
+      (config', c', t', inps, tape, lastRound) <- run $ runITMinIO 120 $ execUC 
+        (benOrEnvAllHonestShuffle r parties crupt 1000)
+        (runAsyncP $ prot ()) 
+        (runAsyncF $ bangFAsync fMulticastToken) 
+        dummyAdversaryToken
+      n <- numOutputs t'
+      no <- retValues t'
+      printYellow (show tape)
+      assert $ no < 2
+      monitor (collect (r, n))
+
+
+propBenOrSucceedSim = monadicIO $ do
     forMseq_ [5] $ \r -> do
       parties <- generateM $ readableParties 10 10
       let t = (length parties `div` 5) - 1
@@ -681,6 +891,9 @@ prop_benOrSucceedSim = monadicIO $ do
       assert decision
 
 {- This enviroment is to determine another lemma: how many parties have to propose a value before no other value can be decided? -}
+
+
+{- This enviroment is to determine another lemma: how many parties have to propose a value before no other value can be decided? -}
 benOrEnvAllHonestTestOutcome
   :: (MonadEnvironment m) => [PID] -> [PID] -> Int -> [PID] -> [PID] -> Int ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
@@ -689,7 +902,7 @@ benOrEnvAllHonestTestOutcome
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool, [[Char]], Int) m
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool, [[Char]], Int) m
 benOrEnvAllHonestTestOutcome pidsT pidsF rounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   liftIO $ putStrLn $ "Parties: " ++ show parties 
@@ -797,7 +1010,7 @@ benOrEnvAllHonestTestOutcome pidsT pidsF rounds parties crupts importAmt z2exec 
 
   writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr, inputM, ac, lr)
 
-prop_uBenOrFindThreshold = monadicIO $ do
+propBenOrFindThreshold = monadicIO $ do
   parties <- generateM $ readableParties 10 10
   let t = 1
   assert $ ((length parties `div` 5) - 1) == t
@@ -829,38 +1042,13 @@ prop_uBenOrFindThreshold = monadicIO $ do
     let decision = (Set.toList o) !! 0
     monitor (collect (numT, length pidsF, decision))
  
--- When testing liveness in the optimistic case we're lookin for protocol design errors
--- and we want to ensure that all messages are delivered. Failures in liveness here indicate
--- problems even in the crash fault setting. The only difference in this generator is that it
--- creates no DELIVER messages for the runqueue.
-benOrGeneratorOnlyMsgs :: Int -> Int -> (String -> SID) -> [PID] -> [Gen Bool] -> Int -> Int -> Gen [BenOrInput]
-benOrGeneratorOnlyMsgs n numQueue ssid parties inputs round dts = frequency $
-  [ (1, return []), 
-    (5, if n==0 then return [] else (:) <$> 
-        ((shuffle parties) >>= 
-          (\pl -> oneof inputs >>= 
-            (\i -> (choose (0, 999999) :: Gen Int) >>=
-              (\s -> return (CmdOne (ssid (show s)) (pl !! 0) round i dts, 0))))) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts)),
-    (5, if n==0 then return [] else (:) <$>
-        ((shuffle parties) >>= 
-          (\pl -> oneof inputs >>= 
-            (\i -> (choose (0, 999999) :: Gen Int) >>=
-              (\s -> return (CmdTwo (ssid (show s)) (pl !! 0) round 0, 0))))) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts)),
-    (5, if n==0 then return [] else (:) <$>
-        ((shuffle parties) >>= 
-          (\pl -> oneof inputs >>= 
-            (\i -> (choose (0, 999999) :: Gen Int) >>=
-              (\s -> return (CmdTwoD (ssid (show s)) (pl !! 0) round i 0, 0))))) <*> (benOrGeneratorOnlyMsgs (n-1) numQueue ssid parties inputs round dts)) 
-  ]
-
-
 {- the problem with such tests may not be solvable. If we move to more structured environments, we're losing some of the "fuzzing" part of testing. It's hard to say that a very structured environment is catching aberrant situatins where liveness fails. It's unclear how exactly to proceed. -}
 --prop_benOrComplete liveCoin = monadicIO $ do
 --  --let prot () = protBenOr
 --  let prot () = (protBenOrBreak BenOrOneCorrect BenOrTwoDCorrect BenOrDecideCorrect liveCoin CorrectState BenOrCheckRounds_Check)
 --  forMseq_ [5, 10, 20] $ \r -> do
 --    (config', inputs, t') <- run $ runITMinIO 120 $ execUC 
---      --(propEnvBenOrLivenessObserve 1000000)
+--      --(benOrEnvDeliverLoop 1000000)
 --      (propUEnvBenOrCompletion 1000000 r)
 --      (runAsyncP $ prot ()) 
 --      (runAsyncF $ bangFAsync fMulticastToken) 
@@ -927,31 +1115,8 @@ benOrGeneratorOnlyMsgs n numQueue ssid parties inputs round dts = frequency $
 --  liftIO $ putStrLn $ "totalFails: " ++ show tF
 --  liftIO $ putStrLn $ "percentFail: " ++ show (((fromIntegral tF) / (fromIntegral tT))*100)
 
-{- 
-  Propert compare structure agnostic of import 
--}
-prop_uBenOrCompare = monadicIO $ do
-  let prot () = protBenOr
-  let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
-  let crupts = ["Alice"]
-  
-  (config', c', t') <- run $ runITMinIO 120 $ execUC 
-    (propUEnvBenOrSafety parties crupts 1000)
-    (runAsyncP $ prot ()) 
-    (runAsyncF $ bangFAsync fMulticastToken) 
-    dummyAdversaryToken
-  
-  numOutputs <- newIORef 0
-  forMseq_ [0..(length t')-1] $ \i -> do
-      case (t' !! i) of 
-          Right (pid, BenOrF2P_Deliver m) -> do
-              modifyIORef numOutputs $ (+) 1
-          _ -> return ()
 
-  n <- readIORef numOutputs
-  monitor (collect n)
-
-propEnvBenOrLivenessObserve
+benOrEnvDeliverLoop
   :: (MonadEnvironment m) => Tokens ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      --(SttCruptA2Z (SID, (MulticastF2P BenOrMsg, TransferTokens Int)) 
@@ -960,8 +1125,8 @@ propEnvBenOrLivenessObserve
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, Transcript) m
-propEnvBenOrLivenessObserve inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+     (ClockZ2F) (BenOrConfig, BenOrTranscript) m
+benOrEnvDeliverLoop inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 {- The goal here is to have a crupt party to just observe how any rounds
     it takes for the protocol to terminte. We just look at the latest round
     received before all honest parties terminate.
@@ -1016,13 +1181,13 @@ propEnvBenOrLivenessObserve inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) 
   writeChan outp ((sid, parties, (Map.fromList [(crupt,())]), t), tr)
 
 -- the property for the above ^^^^^^^^^^^^ environment
-prop_benOrObserve = monadicIO $ do
+propBenOrObserve = monadicIO $ do
   let prot () = protBenOr
   let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
   let crupts = ["Alice"]
   (config', inputs, t') <- run $ runITMinIO 120 $ execUC 
-    --(propEnvBenOrLivenessObserve 1000000)
-    (propUEnvBenOrSafety parties crupts 1000000)
+    --(benOrEnvDeliverLoop 1000000)
+    (benOrEnvRandomRounds parties crupts 1000000)
     (runAsyncP $ prot ()) 
     (runAsyncF $ bangFAsync fMulticastToken) 
     dummyAdversaryToken
@@ -1072,7 +1237,7 @@ propEnvBenOrLiveness
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript) m
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript) m
 propEnvBenOrLiveness inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   
@@ -1234,7 +1399,7 @@ propEnvBenOrAllHonest
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript) m
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript) m
 propEnvBenOrAllHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   
@@ -1331,7 +1496,7 @@ type MonadBenOrEnvironment m =
     ?cmdList :: IORef [Either BenOrInput AsyncInput],
     ?honest :: [PID],
     ?lastOut :: (IORef (Maybe (Either (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) (SID, (MulticastF2A BenOrMsg, TransferTokens Int)))) (PID, BenOrF2P)))),
-    ?transcript :: IORef Transcript,
+    ?transcript :: IORef BenOrTranscript,
     ?clockChan :: Chan Int,
     ?deliverer :: [(PID,PID)] -> AsyncCmd -> m (),
     ?deliverByPairs :: [(PID,PID)] -> m (),
@@ -1363,14 +1528,14 @@ runBenOrEnvironment :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool) m) -> 
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool) m) -> 
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
                   (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool) m
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool) m
 runBenOrEnvironment parties crupts importAmt z z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   liftIO $ putStrLn $ "Parties: " ++ show parties 
@@ -1469,7 +1634,7 @@ propTestAbstraction
                           (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
      ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], Transcript, Map PID Bool) m
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript, Map PID Bool) m
 propTestAbstraction z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   c <- envQueueSize z2a ?clockChan 1000
   

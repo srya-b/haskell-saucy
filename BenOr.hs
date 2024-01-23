@@ -87,9 +87,8 @@ readBangAnyOrder f2p = do
 data BenOrP2F = BenOrP2F_Input Bool deriving Show
 data BenOrF2P = BenOrF2P_OK | BenOrF2P_Deliver Bool deriving (Show, Eq)
 
-type Transcript = [Either
+type BenOrTranscript = [Either
                          (SttCruptA2Z
-                            --(SID, (MulticastF2P BenOrMsg, TransferTokens Int))
                             (SID, (MulticastF2P BenOrMsg, CarryTokens Int))
                             (Either
                                (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
@@ -406,7 +405,7 @@ testEnvBenOr
                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-    ClockZ2F Transcript m
+    ClockZ2F BenOrTranscript m
 testEnvBenOr numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestACast", show (["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"], 1::Integer, ""))
   --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.empty
@@ -474,7 +473,7 @@ testEnvBenOr numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   writeChan outp =<< readIORef transcript
 
 
-testBenOr :: IO Transcript
+testBenOr :: IO BenOrTranscript
 testBenOr = runITMinIO 120 $ execUC
   (testEnvBenOr 100)
   --(runAsyncP $ protBenOr)
@@ -490,7 +489,7 @@ testEnvBreak
                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-    ClockZ2F Transcript m
+    ClockZ2F BenOrTranscript m
 testEnvBreak numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestACast", show (["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"], 1::Integer, ""))
 
@@ -668,7 +667,7 @@ testEnvBreak numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --writeChan outp =<< readIORef transcript
   writeChan outp []
  
-testBreak :: IO Transcript
+testBreak :: IO BenOrTranscript
 testBreak = runITMinIO 120 $ execUC
   (testEnvBreak 100)
   --(runAsyncP $ protBenOr)
@@ -718,7 +717,7 @@ testEnvBenOrCrupt
                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-    ClockZ2F Transcript m
+    ClockZ2F BenOrTranscript m
 testEnvBenOrCrupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestACast", show (["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"], 1::Integer, ""))
 
@@ -793,7 +792,7 @@ testEnvBenOrCrupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   writeChan outp =<< readIORef transcript
 
 
-testBenOrCrupt :: IO Transcript
+testBenOrCrupt :: IO BenOrTranscript
 testBenOrCrupt = runITMinIO 120 $ execUC
   (testEnvBenOr 36)
   --(runAsyncP $ protBenOr)
@@ -1019,7 +1018,7 @@ testEnvSimHonest :: (MonadEnvironment m) => Int ->
                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
                   (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
-    ClockZ2F Transcript m
+    ClockZ2F BenOrTranscript m
 testEnvSimHonest numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestACast", show (["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"], 1::Integer, ""))
 
