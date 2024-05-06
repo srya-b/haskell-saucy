@@ -27,6 +27,28 @@ import Test.QuickCheck.Monadic
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
+instance Arbitrary ACastTVariant where
+  arbitrary = do
+    i :: Int <- choose (1,3)
+    if i==1 then return ACastTSmall
+    else if i==2 then return ACastTLarge
+    else return ACastTCorrect
+
+instance Arbitrary ACastRVariant where
+  arbitrary = do
+    i :: Int <- choose (1,3)
+    if i==1 then return ACastRSmall
+    else if i==2 then return ACastRLarge
+    else return ACastRCorrect
+
+instance Arbitrary ACastDVariant where
+  arbitrary = do
+    i :: Int <- choose (1,3)
+    if i==1 then return ACastDSmall
+    else if i==2 then return ACastDLarge
+    else return ACastDCorrect
+
+
 {- given a tape :: [Either ACastInput AsyncInput] of inputs, replay them -}
 performACastEnv 
   :: (MonadEnvironment m) => 
@@ -43,7 +65,7 @@ performACastEnv aCastConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump
     let (sid :: SID, parties :: [PID], crupt :: Map PID (), t :: Int, leader :: PID) = aCastConfig 
     writeChan z2exec $ SttCrupt_SidCrupt sid crupt
 
-    (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+    (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
         
     () <- readChan pump 
     -- TODO: need to do something about this
@@ -187,7 +209,7 @@ prop_dummySafety = monadicIO $ do
     let x :: String = show t
     assert (1 == 1) 
 
-propEnvBrachaBasic
+envBrachaBasic
   :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment (ACastF2P String) ((ClockP2F (ACastP2F String)), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), CarryTokens Int)) 
@@ -196,11 +218,11 @@ propEnvBrachaBasic
      ((SttCruptZ2A (ClockP2F (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F (ACastMsg String), TransferTokens Int)))), CarryTokens Int) Void
      (ClockZ2F) (ACastConfig, [Either ACastInput AsyncInput], Transcript) m
-propEnvBrachaBasic parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+envBrachaBasic parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
  
   let honest = parties \\ crupts  
-  leader <-  liftIO $ (generate $ elements honest)
+  let leader = honest !! 0
   let t = length parties `div` 3 
   let sssid = "sidTestACast" 
   let sid = (sssid, show (leader, parties, t, ""))
@@ -208,26 +230,21 @@ propEnvBrachaBasic parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z
 
   let cruptMapList = map (\x -> (x,())) crupts
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
- 
-  -- compute ssids
-  --let ssidAlice1 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "1"))
-  --let ssidAlice2 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "2"))
-  --let ssidAlice3 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "3"))
-
-  --let ssids = do [return ssidAlice1, return ssidAlice2, return ssidAlice3]
+  () <- readChan pump
  
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   
-  (delivered, deliverByPairs) <- envMapQueue z2a a2z clockChan lastOut pump
+  let valueFilter msg = case msg of
+                          ACast_VAL b -> (1,b)
+                          ACast_ECHO b -> (2,b)
+                          ACast_READY b -> (3,b)
 
-  --let inputs = do [return "1", return "2"]
-  
-  forMseq_ (honest) $ \h -> do
-    x <- liftIO $ generate $ elements ["1","2"]
-    modifyIORef cmdList $ (++ [Left $ (CmdHonestInput h x, importAmt)])
-    writeChan z2p $ (h, ((ClockP2F_Through $  ACastP2F_Input x), SendTokens importAmt))
-    readChan pump
+  (delivered, deliverByPairs, getByPairs, getBySender, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter cmdList
+
+  x <- liftIO $ generate $ elements ["1", "2"]
+  writeChan z2p $ (leader, ((ClockP2F_Through $ ACastP2F_Input x), SendTokens importAmt))
+  () <- readChan pump
 
   firstInp <- newIORef []
   forMseq_ [1..50] $ \r -> do
@@ -235,8 +252,9 @@ propEnvBrachaBasic parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z
     c <- envQueueSize z2a clockChan 0
     
     -- execute the messages in some order
-    f <- liftIO $ generate $ arbitrary `suchThat` (> 1)
-    inps <- liftIO $ generate $ frequency [ (3, rqDeliverChoice c f), (1, rqDeliverAll c) ]
+    --f <- liftIO $ generate $ arbitrary `suchThat` (> 1)
+    --inps <- liftIO $ generate $ frequency [ (3, rqDeliverChoice c f), (1, rqDeliverAll c) ]
+    inps <- liftIO $ generate $ rqDeliverAll c
     forMseq_ inps $ \inp -> do
       modifyIORef cmdList $ (++ [Right (inp, 0)])
       envExecAsyncCmd z2p z2a z2f clockChan pump (inp, 0)
@@ -248,16 +266,13 @@ propEnvBrachaBasic parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z
   writeChan outp ((sid, parties, (Map.fromList cruptMapList), t, leader), cl, tr)
 
 {- Test for basic indistinguishability: all honest -}
-prop_BrachaHonestSim = monadicIO $ do
-  let variantT = ACastTSmall
-  let variantR = ACastRSmall
-  let variantD = ACastDSmall
+--prop_BrachaHonestSim = monadicIO $ do
+prop_BrachaCrashFault variantT variantR variantD = do
   let prot () = protACastBroken variantT variantR variantD 
-  forAllM ( suchThat (arbitrary :: Gen [PID]) nonZeroParties) $ \ps -> do
-    let t = length ps `div` 3
-    forAllM (cruptFrom ps t) $ \cs -> do
+  forAllM (readableParties 4 5) $ \ps -> do
+    forAllM (cruptFrom ps 3) $ \cs -> do
       (config', c', t') <- run $ runITMinIO 120 $ execUC
-        (propEnvBrachaBasic ps cs 100)
+        (envBrachaBasic ps cs 100)
         (runAsyncP $ prot ())
         (runAsyncF $ bangFAsync fMulticastToken)
         dummyAdversaryToken
@@ -270,11 +285,22 @@ prop_BrachaHonestSim = monadicIO $ do
               _ -> return ()
       o <- readIORef outputs
       pre $ (Set.size o) > 0
-      assert $ (Set.size o) < 2
+      assert $ (Set.size o) == 1
 
+propCrashFaultCCC = monadicIO $ prop_BrachaCrashFault ACastTCorrect ACastRCorrect ACastDCorrect
+propCrashFaultSSS = monadicIO $ prop_BrachaCrashFault ACastTSmall ACastRSmall ACastDSmall
+propCrashFaultCSS = monadicIO $ prop_BrachaCrashFault ACastTCorrect ACastRSmall ACastDSmall
+propCrashFaultSCS = monadicIO $ prop_BrachaCrashFault ACastTSmall ACastRCorrect ACastDSmall
+propCrashFaultSSC = monadicIO $ prop_BrachaCrashFault ACastTSmall ACastRSmall ACastDCorrect
+propCrashFaultSCC = monadicIO $ prop_BrachaCrashFault ACastTSmall ACastRCorrect ACastDCorrect
 
-propREnvBrachaSafety
-  :: (MonadEnvironment m) =>
+brachaCrashFaultSafety = monadicIO $ do
+  forAllM arbitrary $ \(tvar, rvar, dvar) -> do
+    prop_BrachaCrashFault tvar rvar dvar
+    monitor (collect (tvar, rvar, dvar)) 
+
+envRandom
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int -> 
   Environment (ACastF2P String) ((ClockP2F (ACastP2F String)), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), CarryTokens Int)) 
                   (Either (ClockF2A (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int)))
@@ -282,31 +308,32 @@ propREnvBrachaSafety
      ((SttCruptZ2A (ClockP2F (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F (ACastMsg String), TransferTokens Int)))), CarryTokens Int) Void
      (ClockZ2F) (ACastConfig, [Either ACastInput AsyncInput], Transcript) m
-propREnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+envRandom parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   
-  let parties = ["Alice", "Bob", "Carol", "Dave"]
-  let leader = "Alice"
-  let t = 1 :: Int
-  let crupt = Map.fromList [("Alice",())] :: Map PID () 
-  let sid = ("sidTestACast", show (leader, parties, t, ""))
+  let honest = parties \\ crupts
   let n = length parties
+  let leader = crupts !! 0
+  let t = 1 :: Int
+  let cruptMapList = map (\x -> (x,())) crupts
+  let sid = ("sidTestACast", show (leader, parties, t, ""))
  
   -- compute ssids
-  let ssidAlice1 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "1"))
-  let ssidAlice2 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "2"))
-  let ssidAlice3 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "3"))
+  --let ssidAlice1 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "1"))
+  --let ssidAlice2 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "2"))
+  --let ssidAlice3 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "3"))
+  let ssidAlice1 = ("sidTestACast", show (leader, parties, "1"))
+  let ssidAlice2 = ("sidTestACast", show (leader, parties, "2"))
+  let ssidAlice3 = ("sidTestACast", show (leader, parties, "3"))
 
   let ssids = do [return ssidAlice1, return ssidAlice2, return ssidAlice3]
  
-  writeChan z2exec $ SttCrupt_SidCrupt sid crupt
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
 
-  --transcript <- newIORef []
   cmdList <- newIORef []
-  --debugLog <- newIORef []
 
   numDelivers <- newIORef 0
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   liftIO $ putStrLn $ "asking for count"
@@ -324,7 +351,7 @@ propREnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
     modifyIORef cmdList $ (++ [Right (CmdGetCount, 0)])
     writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 0)
     c <- readChan clockChan
-    inps <- liftIO $ generate $ aRCastGenerator 1 c ssids parties inputs (n*5)
+    inps <- liftIO $ generate $ aRCastGenerator 1 c ssids parties inputs (n * 5)
     envExecCmd z2p z2a z2f clockChan pump (inps !! 0) envExecACastCmd
     
     return ()
@@ -336,7 +363,7 @@ propREnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --liftIO $ putStrLn $ "\n\t[Ideal World dl]\n" ++ (show dl)
   liftIO $ putStrLn $ "\n\t[Ideal World cl]\n" ++ (show cl)
 
-  writeChan outp ((sid, parties, crupt, t, leader), cl, tr)
+  writeChan outp ((sid, parties, Map.fromList cruptMapList, t, leader), cl, tr)
 
   return ()
 
@@ -346,59 +373,59 @@ propREnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   This property compares the  
 -}
 prop_compareSURSafetyStructure = monadicIO $ do 
-    let variantT = ACastTSmall
-    let variantR = ACastRSmall
-    let variantD = ACastDSmall
-    let prot () = protACastBroken variantT variantR variantD 
-    (configU', cU', tU') <- run $ runITMinIO 120 $ execUC 
-      propUEnvBrachaSafety 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    -- require that all deliverances are the same
-    numOutputs <- newIORef 0
-    forMseq_ [0..(length tU')-1] $ \i -> do
-        case (tU' !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (tU' !! i))
-                modifyIORef numOutputs $ (+) 1
-            Left m -> return ()
-    no <- readIORef numOutputs
-    monitor (collect ("minStructured", no))
+  let variantT = ACastTSmall
+  let variantR = ACastRSmall
+  let variantD = ACastDSmall
+  let prot () = protACastBroken variantT variantR variantD 
+  forAllM (readableParties 4 5) $ \ps -> do
+    forAllM (cruptFrom ps 3) $ \cs -> do
+      (configU', cU', tU') <- run $ runITMinIO 120 $ execUC 
+        (envMinStructure ps cs 10000)
+        (runAsyncP $ prot ()) 
+        (runAsyncF $ bangFAsync fMulticastToken) 
+        dummyAdversaryToken
+      -- require that all deliverances are the same
+      numOutputs <- newIORef 0
+      forMseq_ [0..(length tU')-1] $ \i -> do
+          case (tU' !! i) of 
+              Right (pid, ACastF2P_Deliver m) -> do
+                  printYellow (show (tU' !! i))
+                  modifyIORef numOutputs $ (+) 1
+              Left m -> return ()
+      no <- readIORef numOutputs
+      monitor (collect ("minStructured", no))
 
-    (configS', cS', tS') <- run $ runITMinIO 120 $ execUC 
-      propEnvBrachaSafety 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    -- require that all deliverances are the same
-    numOutputs <- newIORef 0
-    forMseq_ [0..(length tS')-1] $ \i -> do
-        case (tS' !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (tS' !! i))
-                modifyIORef numOutputs $ (+) 1
-            Left m -> return ()
-    no <- readIORef numOutputs
-    monitor (collect ("Structured", no))
-    
-    (configR', cR', tR') <- run $ runITMinIO 120 $ execUC 
-      propREnvBrachaSafety 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    -- require that all deliverances are the same
-    numOutputs <- newIORef 0
-    forMseq_ [0..(length tR')-1] $ \i -> do
-        case (tR' !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (tR' !! i))
-                modifyIORef numOutputs $ (+) 1
-            Left m -> return ()
-    no <- readIORef numOutputs
-    monitor (collect ("Random", no))
-       
-
+      (configS', cS', tS') <- run $ runITMinIO 120 $ execUC 
+        (envThreeRounds ps cs 1000)
+        (runAsyncP $ prot ()) 
+        (runAsyncF $ bangFAsync fMulticastToken) 
+        dummyAdversaryToken
+      -- require that all deliverances are the same
+      numOutputs <- newIORef 0
+      forMseq_ [0..(length tS')-1] $ \i -> do
+          case (tS' !! i) of 
+              Right (pid, ACastF2P_Deliver m) -> do
+                  printYellow (show (tS' !! i))
+                  modifyIORef numOutputs $ (+) 1
+              Left m -> return ()
+      no <- readIORef numOutputs
+      monitor (collect ("Structured", no))
+      
+      (configR', cR', tR') <- run $ runITMinIO 120 $ execUC 
+        (envRandom ps cs 1000)
+        (runAsyncP $ prot ()) 
+        (runAsyncF $ bangFAsync fMulticastToken) 
+        dummyAdversaryToken
+      -- require that all deliverances are the same
+      numOutputs <- newIORef 0
+      forMseq_ [0..(length tR')-1] $ \i -> do
+          case (tR' !! i) of 
+              Right (pid, ACastF2P_Deliver m) -> do
+                  printYellow (show (tR' !! i))
+                  modifyIORef numOutputs $ (+) 1
+              Left m -> return ()
+      no <- readIORef numOutputs
+      monitor (collect ("Random", no))
 
 {-
     [ ENVIRONMENT ]
@@ -411,8 +438,8 @@ prop_compareSURSafetyStructure = monadicIO $ do
     react to items bein added to the queue. Tried to define the generator in a way that it would
     read the size of the queue on every iteration, but we weren't successful.
 -}
-propUEnvBrachaSafety
-  :: (MonadEnvironment m) =>
+envMinStructure
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment (ACastF2P String) ((ClockP2F (ACastP2F String)), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), CarryTokens Int)) 
                   (Either (ClockF2A (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int)))
@@ -420,13 +447,13 @@ propUEnvBrachaSafety
      ((SttCruptZ2A (ClockP2F (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F (ACastMsg String), TransferTokens Int)))), CarryTokens Int) Void
      (ClockZ2F) (ACastConfig, [Either ACastInput AsyncInput], Transcript) m
-propUEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+envMinStructure parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   
-  let parties = ["Alice", "Bob", "Carol", "Dave"]
-  let leader = "Alice"
+  let honest = parties \\ crupts
+  let leader = crupts !! 0
   let t = 1 :: Int
-  let crupt = Map.fromList [("Alice",())] :: Map PID () 
+  let cruptMapList = map (\x -> (x,())) crupts
   let sid = ("sidTestACast", show (leader, parties, t, ""))
   let n = length parties
  
@@ -437,18 +464,18 @@ propUEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 
   let ssids = do [return ssidAlice1, return ssidAlice2, return ssidAlice3]
  
-  writeChan z2exec $ SttCrupt_SidCrupt sid crupt
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
 
   --transcript <- newIORef []
   cmdList <- newIORef []
   --debugLog <- newIORef []
 
   numDelivers <- newIORef 0
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   liftIO $ putStrLn $ "asking for count"
-  writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
+  writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000000)
   c <- readChan clockChan
  
   -- Select a set of parties and select one of 0 and 1 for each VAL message
@@ -512,7 +539,7 @@ propUEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --liftIO $ putStrLn $ "\n\t[Ideal World dl]\n" ++ (show dl)
   liftIO $ putStrLn $ "\n\t[Ideal World cl]\n" ++ (show cl)
 
-  writeChan outp ((sid, parties, crupt, t, leader), cl, tr)
+  writeChan outp ((sid, parties, Map.fromList cruptMapList, t, leader), cl, tr)
 
   return ()
 
@@ -525,34 +552,40 @@ prop_uBrachaSafety = monadicIO $ do
     let variantR = ACastRCorrect
     let variantD = ACastDCorrect
     let prot () = protACastBroken variantT variantR variantD 
-    (config', c', t') <- run $ runITMinIO 120 $ execUC 
-      propUEnvBrachaSafety 
-      idealProtocolToken 
-      (runAsyncF fACastToken) 
-      (runTokenA $ simACastBroken $ prot ())
-    t <- run $ runITMinIO 120 $ execUC 
-      (performACastEnv config' c') 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    let x :: String = show t
-    -- require that all deliverances are the same
-    outputs <- newIORef Set.empty
-    forMseq_ [0..(length t)-1] $ \i -> do
-        case (t !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (t !! i))
-                modifyIORef outputs $ Set.insert m
-            Left m -> return ()
-    o <- readIORef outputs
+    forAllM (readableParties 4 5) $ \ps -> do
+      forAllM (cruptFrom ps 3) $ \cs -> do
+        --(config', c', t') <- run $ runITMinIO 120 $ execUC 
+        --  envMinStructure 
+        --  idealProtocolToken 
+        --  (runAsyncF fACastToken) 
+        --  (runTokenA $ simACastBroken $ prot ())
+        (config', c', t) <- run $ runITMinIO 120 $ execUC 
+          --(performACastEnv config' c') 
+          (envMinStructure ps cs 1000)
+          (runAsyncP $ prot ()) 
+          (runAsyncF $ bangFAsync fMulticastToken) 
+          dummyAdversaryToken
+        let x :: String = show t
+        -- require that all deliverances are the same
+        outputs <- newIORef Set.empty
+        forMseq_ [0..(length t)-1] $ \i -> do
+            case (t !! i) of 
+                Right (pid, ACastF2P_Deliver m) -> do
+                    printYellow (show (t !! i))
+                    modifyIORef outputs $ Set.insert m
+                Left m -> return ()
+        o <- readIORef outputs
 
-    printYellow ("[ ideal world ] \n" ++ show t')
-    printYellow ("[ real world ] \n" ++ show t)
-    assert ( (Set.size o) <= 1 )
-    assert (t' == t)
+        --printYellow ("[ ideal world ] \n" ++ show t')
+        printYellow ("[ real world ] \n" ++ show t)
+        --assert ( (Set.size o) <= 1 )
+        pre $ (Set.size o) > 0
+        assert $ (Set.size o) == 1
+        assert False
+        --assert (t' == t)
        
-propEnvBrachaSafety
-  :: (MonadEnvironment m) =>
+envThreeRounds
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int -> 
   Environment (ACastF2P String) ((ClockP2F (ACastP2F String)), CarryTokens Int)
      --(SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), TransferTokens Int)) 
      (SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), CarryTokens Int)) 
@@ -561,13 +594,13 @@ propEnvBrachaSafety
      ((SttCruptZ2A (ClockP2F (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int))) 
                   (Either ClockA2F (SID, (MulticastA2F (ACastMsg String), TransferTokens Int)))), CarryTokens Int) Void
      (ClockZ2F) (ACastConfig, [Either ACastInput AsyncInput], Transcript) m
-propEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+envThreeRounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let extendRight conf = show ("", conf)
   
-  let parties = ["Alice", "Bob", "Carol", "Dave"]
-  let leader = "Alice"
+  let honest = parties \\ crupts
+  let leader = crupts !! 0
   let t = 1 :: Int
-  let crupt = Map.fromList [("Alice",())] :: Map PID () 
+  let cruptMapList = map (\x -> (x,())) crupts
   let sid = ("sidTestACast", show (leader, parties, t, ""))
 
   -- compute ssids
@@ -575,12 +608,12 @@ propEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let ssidAlice2 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "2"))
   let ssidAlice3 = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], "3"))
   
-  writeChan z2exec $ SttCrupt_SidCrupt sid crupt
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
 
   cmdList <- newIORef []
 
   numDelivers <- newIORef 0
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
@@ -647,40 +680,42 @@ propEnvBrachaSafety z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   tr <- readIORef transcript
   cl <- readIORef cmdList
   --writeChan outp =<< readIORef transcript
-  writeChan outp ((sid, parties, crupt, t, leader), reverse cl, tr)
+  writeChan outp ((sid, parties, Map.fromList cruptMapList, t, leader), reverse cl, tr)
 
 {-    
     [ PROPERTY ]
 -}
-prop_brachaSafety = monadicIO $ do
+propCruptSenderSafety = monadicIO $ do
     let variantT = ACastTSmall
     let variantR = ACastRSmall
     let variantD = ACastDSmall
     let prot () = protACastBroken variantT variantR variantD 
-    (config', c', t') <- run $ runITMinIO 120 $ execUC 
-      propEnvBrachaSafety 
-      idealProtocolToken 
-      (runAsyncF fACastToken) 
-      (runTokenA $ simACastBroken $ prot ())
-    t <- run $ runITMinIO 120 $ execUC 
-      (performACastEnv config' c') 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    let x :: String = show t
-    -- require that all deliverances are the same
-    outputs <- newIORef Set.empty
-    forMseq_ [0..(length t)-1] $ \i -> do
-        case (t !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> 
-                modifyIORef outputs $ Set.insert m
-            Left m -> return ()
-    o <- readIORef outputs
+    forAllM (readableParties 4 5) $ \ps -> do
+      forAllM (cruptFrom ps 3) $ \cs -> do
+        (config', c', t') <- run $ runITMinIO 120 $ execUC 
+          (envThreeRounds ps cs 1000)
+          idealProtocolToken 
+          (runAsyncF fACastToken) 
+          (runTokenA $ simACastBroken $ prot ())
+        t <- run $ runITMinIO 120 $ execUC 
+          (performACastEnv config' c') 
+          (runAsyncP $ prot ()) 
+          (runAsyncF $ bangFAsync fMulticastToken) 
+          dummyAdversaryToken
+        let x :: String = show t
+        -- require that all deliverances are the same
+        outputs <- newIORef Set.empty
+        forMseq_ [0..(length t)-1] $ \i -> do
+            case (t !! i) of 
+                Right (pid, ACastF2P_Deliver m) -> 
+                    modifyIORef outputs $ Set.insert m
+                Left m -> return ()
+        o <- readIORef outputs
 
-    printYellow ("[Config]\n\n" ++ show config')
-    printYellow ("[Inputs]\n\n" ++ show c')
-    assert ( (Set.size o) <= 1 )
-    assert (t == t')
+        printYellow ("[Config]\n\n" ++ show config')
+        printYellow ("[Inputs]\n\n" ++ show c')
+        assert ( (Set.size o) <= 1 )
+        assert (t == t')
 
 {-    
     [ PROPERTY ]
@@ -690,41 +725,43 @@ prop_compareSafetyStructure = monadicIO $ do
     let variantR = ACastRSmall
     let variantD = ACastDSmall
     let prot () = protACastBroken variantT variantR variantD 
-    (configU', cU', tU') <- run $ runITMinIO 120 $ execUC 
-      propUEnvBrachaSafety 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    -- require that all deliverances are the same
-    numOutputs <- newIORef 0
-    forMseq_ [0..(length tU')-1] $ \i -> do
-        case (tU' !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (tU' !! i))
-                modifyIORef numOutputs $ (+) 1
-            Left m -> return ()
-    no <- readIORef numOutputs
-    monitor (collect ("Unstructured", no))
+    forAllM (readableParties 4 5) $ \ps -> do
+      forAllM (cruptFrom ps 3) $ \cs -> do
+        (configU', cU', tU') <- run $ runITMinIO 120 $ execUC 
+          (envMinStructure ps cs 1000)
+          (runAsyncP $ prot ()) 
+          (runAsyncF $ bangFAsync fMulticastToken) 
+          dummyAdversaryToken
+        -- require that all deliverances are the same
+        numOutputs <- newIORef 0
+        forMseq_ [0..(length tU')-1] $ \i -> do
+            case (tU' !! i) of 
+                Right (pid, ACastF2P_Deliver m) -> do
+                    printYellow (show (tU' !! i))
+                    modifyIORef numOutputs $ (+) 1
+                Left m -> return ()
+        no <- readIORef numOutputs
+        monitor (collect ("Unstructured", no))
 
-    (configS', cS', tS') <- run $ runITMinIO 120 $ execUC 
-      propEnvBrachaSafety 
-      (runAsyncP $ prot ()) 
-      (runAsyncF $ bangFAsync fMulticastToken) 
-      dummyAdversaryToken
-    -- require that all deliverances are the same
-    numOutputs <- newIORef 0
-    forMseq_ [0..(length tS')-1] $ \i -> do
-        case (tS' !! i) of 
-            Right (pid, ACastF2P_Deliver m) -> do
-                printYellow (show (tS' !! i))
-                modifyIORef numOutputs $ (+) 1
-            Left m -> return ()
-    no <- readIORef numOutputs
-    monitor (collect ("Structured", no))
+        (configS', cS', tS') <- run $ runITMinIO 120 $ execUC 
+          (envThreeRounds ps cs 1000)
+          (runAsyncP $ prot ()) 
+          (runAsyncF $ bangFAsync fMulticastToken) 
+          dummyAdversaryToken
+        -- require that all deliverances are the same
+        numOutputs <- newIORef 0
+        forMseq_ [0..(length tS')-1] $ \i -> do
+            case (tS' !! i) of 
+                Right (pid, ACastF2P_Deliver m) -> do
+                    printYellow (show (tS' !! i))
+                    modifyIORef numOutputs $ (+) 1
+                Left m -> return ()
+        no <- readIORef numOutputs
+        monitor (collect ("Structured", no))
 
 -- same as safety environment except all messages are delievered
 -- in the right logical round         
---propEnvBrachaLiveness
+--envBrachaLiveness
 --  :: (MonadEnvironment m) =>
 --  Environment (ACastF2P String) ((ClockP2F (ACastP2F String)), CarryTokens Int)
 --     (SttCruptA2Z (SID, (MulticastF2P (ACastMsg String), TransferTokens Int)) 
@@ -733,7 +770,7 @@ prop_compareSafetyStructure = monadicIO $ do
 --     ((SttCruptZ2A (ClockP2F (SID, ((ACastMsg String, TransferTokens Int), CarryTokens Int))) 
 --                  (Either ClockA2F (SID, (MulticastA2F (ACastMsg String), TransferTokens Int)))), CarryTokens Int) Void
 --     (ClockZ2F) (ACastConfig, [Either ACastCmd AsyncCmd], Transcript) m
---propEnvBrachaLiveness z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+--envBrachaLiveness z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 --  let extendRight conf = show ("", conf)
 --  
 --  let parties = ["Alice", "Bob", "Carol", "Dave"]

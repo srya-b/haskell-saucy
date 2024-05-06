@@ -140,7 +140,7 @@ performBenOrEnv benOrConfig cmdList z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump
     let (sid :: SID, parties :: [PID], crupt :: Map PID (), t :: Int) = benOrConfig 
     writeChan z2exec $ SttCrupt_SidCrupt sid crupt
 
-    (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+    (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
         
     () <- readChan pump 
   
@@ -189,7 +189,7 @@ benOrEnvRandomRounds parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z,
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
   
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
@@ -311,7 +311,7 @@ benOrEnvTrackDecideRound parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
   
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
@@ -491,7 +491,7 @@ benOrEnvByPartition parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, 
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
   
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
@@ -716,7 +716,7 @@ benOrEnvAllHonestShuffle rounds parties crupts importAmt z2exec (p2z, z2p) (a2z,
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.empty)
   
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
@@ -920,7 +920,7 @@ benOrEnvAllHonestTestOutcome pidsT pidsF rounds parties crupts importAmt z2exec 
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
   
   cmdList <- newIORef []  
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
@@ -1144,7 +1144,7 @@ benOrEnvDeliverLoop inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump out
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList [(crupt, ())])
   thingsHappened <- newIORef 0
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   
   () <- readChan pump
   writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
@@ -1258,7 +1258,7 @@ propEnvBenOrLiveness inputTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump ou
   cmdList <- newIORef []  
   thingsHappened <- newIORef 0
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   counter <- newIORef 0
   let multicastSid c ps p = (show c, show (p, ps, ""))
@@ -1414,7 +1414,7 @@ propEnvBenOrAllHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   cmdList <- newIORef []  
   thingsHappened <- newIORef 0
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   writeChan z2a $ ((SttCruptZ2A_A2F $ Left ClockA2F_GetCount), SendTokens 1000)
@@ -1552,7 +1552,7 @@ runBenOrEnvironment parties crupts importAmt z z2exec (p2z, z2p) (a2z, z2a) (f2z
   let cruptMapList = map (\x -> (x,())) crupts
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
   cmdList <- newIORef []  
-  (_lastOut, _transcript, _clockChan) <- envReadOut p2z a2z
+  (_lastOut, _transcript, _clockChan, _leakLimited) <- envReadOut p2z a2z
 
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)

@@ -235,7 +235,7 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
     let yprint s r = do
                     liftIO $ putStrLn $ "\t\t\ESC[93m [" ++ show pid ++ ", " ++ show r ++ "] " ++ show s ++ "\ESC[0m"
 
-    let debug = False
+    let debug = True
     let dprint s r = do if debug then (print s r) else return ()
 
 {- [TOKENS] -}
@@ -291,6 +291,7 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
     -- get f2p input
     fork $ forever $ do
         (s, (m, SendTokens tks)) <- readChan f2p
+        liftIO $ putStrLn $ "message f2p: " ++ show (s, m)
         modifyIORef tokens $ (+) tks
 
         let (pidS :: PID, fParties :: [PID], ssid :: String) = readNote "fMulticastAndCoin" $ snd s
@@ -355,7 +356,7 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
                       writeIORef freezeViewRecord True
                       writeChan nMinusTChan ()
                     else do
-                      rprint ("?pass") r
+                      --rprint ("?pass") r
                       ?pass
                   else do
                     ?pass
@@ -660,10 +661,13 @@ protABABroken thresh bcastVariant svalVariant checkRound resetBinPtr acceptAnyAu
                 -- Chande back
                 --Just b -> do
                 Just b' -> do
-                  let b = if r==1 then True
-                          else if r==2 then True
-                          else if r==3 then False
-                          else b'
+                  --let b = if r==1 then True
+                  --        else if r==2 then True
+                  --        else if r==3 then True
+                  --        else if r==4 then True 
+                  --        else if r==5 then True
+                  --        else b'
+                  let b = b'
                   gprint ("Common coin: " ++ show b) r 
 
                   -- this coin flip becomes the next s_i
@@ -980,32 +984,34 @@ testEnvABALemma17Rounds z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   estToT <- intersectM (estTrue 1) (getByReceivers pidsT)
   estFoF <- intersectM (estFalse 1) (getByReceivers pidsF)
   doDelivers $ estToT ++ estFoF
-  -- at this point: pidsT have bp[T] and pidsF have bp[F]
-  -- we want pidsT to output EST(F) but not set bp[F] so we can use them in the next round
-  forMseq_ pidsT $ \pT -> do
-    estFtopT <- intersectM (estFalse 1) (getByReceivers [pT])
-    doDelivers (take 3 estFtopT)
 
-  -- set bp[T] for pidsF
-  estTtoF <- intersectM (estTrue 1) (getByReceivers pidsF)
-  doDelivers estTtoF
+  forMseq_ [1,3,4] $ \r -> do
+    -- at this point: pidsT have bp[T] and pidsF have bp[F]
+    -- we want pidsT to output EST(F) but not set bp[F] so we can use them in the next round
+    forMseq_ pidsT $ \pT -> do
+      estFtopT <- intersectM (estFalse 1) (getByReceivers [pT])
+      doDelivers (take 3 estFtopT)
 
-  -- pidsT will decide but pidsF will go into the next round and everyone 
-  -- will have supportCoin = True
-  auxs <- allAuxs 1
-  doDelivers auxs
+    -- set bp[T] for pidsF
+    estTtoF <- intersectM (estTrue 1) (getByReceivers pidsF)
+    doDelivers estTtoF
 
-  ests <- allEsts 1
-  doDelivers ests
+    -- pidsT will decide but pidsF will go into the next round and everyone 
+    -- will have supportCoin = True
+    auxs <- allAuxs r
+    doDelivers auxs
+
+    ests <- allEsts r
+    doDelivers ests
+    
+    ests <- allEsts (r+1)
+    doDelivers ests
+
+    auxs <- allAuxs (r+1)
+    doDelivers auxs
+
   
-  ests <- allEsts 2
-  doDelivers ests
-
-  auxs <- allAuxs 2
-  doDelivers auxs
-
   leaks <- getLeaks
-  
   tr <- readIORef transcript
   cl <- readIORef cmdList
   ll <- readIORef leakLimited
@@ -1024,6 +1030,59 @@ countDecisions l (t:tr) = case t of
                               else 1 + countDecisions (l ++ [b]) tr
                             _ -> countDecisions l tr
 numDecisions tr = countDecisions [] tr
+
+firstDecision [] = error "no output found"
+firstDecision (t:tr) = case t of
+                         Right (pid, (ABAF2P_Out b, SendTokens st)) -> b
+                         _ -> firstDecision tr
+
+type ABALeaks = Either [(SID, ((ABACast, TransferTokens Int), CarryTokens Int))] (PID, (ABAF2P, CarryTokens Int))
+type BetterABALeaks = Either (PID, ((ABACast, TransferTokens Int), CarryTokens Int)) (PID, (ABAF2P, CarryTokens Int))
+
+justLeaks :: [ABALeaks] -> [(SID, ((ABACast, TransferTokens Int), CarryTokens Int))]
+justLeaks [] = []
+justLeaks (x:xs) =
+  case x of
+    Left leaks -> leaks ++ justLeaks xs
+    _ -> justLeaks xs
+
+parseLeak :: (SID, ((ABACast, TransferTokens Int), CarryTokens Int)) -> (PID, ((ABACast, TransferTokens Int), CarryTokens Int))
+parseLeak (sid, m) = (pidS, m)
+                where (pidS :: PID, parties :: [PID], sssid :: String) = readNote "SCCMulticast" $ snd sid 
+
+betterLeaks :: [ABALeaks] -> [BetterABALeaks]
+betterLeaks [] = []
+betterLeaks (x:xs) = 
+  case x of
+    Left leaks -> (map Left . map parseLeak $ leaks) ++ (betterLeaks xs)
+    Right m -> ([Right m] ++ (betterLeaks xs))
+
+estP :: PID -> [(PID, ((ABACast, TransferTokens Int), CarryTokens Int))] -> [Int]
+estP pidS [] = []
+estP pidS (x:xs) =
+  case x of
+    (pid', ((EST r b, DeliverTokensWithMessage tk), SendTokens st)) -> 
+      if pid' == pidS then [r] ++ (estP pidS xs)
+      else (estP pidS xs)
+    (pid', ((AUX r b, DeliverTokensWithMessage tk), SendTokens st)) -> estP pidS xs
+
+auxP :: PID -> [(PID, ((ABACast, TransferTokens Int), CarryTokens Int))] -> [Int]
+auxP pidS [] = []
+auxP pidS (x:xs) =
+  case x of
+    (pid', ((AUX r b, DeliverTokensWithMessage tk), SendTokens st)) -> 
+      if pid' == pidS then [r] ++ (auxP pidS xs)
+      else (auxP pidS xs)
+    (pid', ((EST r b, DeliverTokensWithMessage tk), SendTokens st)) -> auxP pidS xs
+
+decideRound :: pidS -> Int -> [BetterABALeaks] -> Int
+decideRound pidS r [] = 0
+decideRound pidS r (x:xs) =
+  case x of
+    Left (pid, ((EST r' b, _), _)) -> decideRound pidS (max r r') xs 
+    Left (pid, ((AUX r' b, _), _)) -> decideRound pidS (max r r') xs
+    Right (pid, (ABAF2P_Ok, _)) -> decideRound pidS r xs
+    Right (pid, (ABAF2P_Out b, _)) -> r
 
 testABALemma17Rounds = do
   let prot () = protABABreak (ABACorrect, SBcastCorrect, SBSCorrect, ABARounds_Buggy, ABABinPtr_Persist, ABAAnyAux_Correct)
@@ -1047,6 +1106,53 @@ testABALemma17Rounds = do
   lastEst <- newIORef (Map.empty :: Map PID Int)
   whenDecide <- newIORef (Map.empty :: Map PID Int)
   lastRound <- newIORef 0
+  let roundCoins = [False, True, True, True, True, True]
+
+  forMseq_ (parties \\ crupts) $ \p -> do
+    let ests = estP p . map parseLeak . justLeaks $ ll
+    liftIO $ putStrLn $ "ests for " ++ show p ++ " " ++ show ests
+    let auxs = auxP p . map parseLeak . justLeaks $ ll
+    liftIO $ putStrLn $ "auxs for " ++ show p ++ " " ++ show auxs
+    let dec = decideRound p 0 (betterLeaks ll)
+    modifyIORef estInR $ Map.insert p ests
+    modifyIORef auxInR $ Map.insert p auxs
+    modifyIORef whenDecide $ Map.insert p dec
+  readIORef estInR >>= liftIO . putStrLn . ("estInR " ++) . show
+  readIORef auxInR >>= liftIO . putStrLn . ("auxInR " ++) . show
+
+
+  forMseq_ [2..4] $ \r -> do
+    forMseq_ (parties \\ crupts) $ \p -> do
+      ests <- (readIORef estInR >>= (return . filter (< r) . Map.findWithDefault [] p))
+      auxs <- (readIORef auxInR >>= (return . filter (< r) . Map.findWithDefault [] p))
+      if (elem (r-1) auxs) && not (elem r ests) then do
+        modifyIORef supportCoinsTrueInRound (Map.insertWith (+) r 1)
+      else return ()
+
+  scInR <- (readIORef supportCoinsTrueInRound >>= return . Map.assocs)
+  liftIO $ putStrLn $ "scInR " ++ show scInR
+  decisionRounds <- (readIORef whenDecide >>= return . Map.elems)
+  forMseq_ scInR $ \(round, numsc) -> do
+    if numsc == (length (parties \\ crupts)) then do
+      let (sameRound :: Bool) = (foldr (&&) True (map (== round) decisionRounds)) && ((length decisionRounds) > 0)
+      let sameCoin = ((roundCoins !! round) == (roundCoins !! (round-1)))
+      if (not sameRound) && sameCoin then do
+        liftIO $ putStrLn $ "\t\t*************Violation of Lemma 17********************"
+        --error "success"
+      else return ()
+    else return ()
+  
+
+  liftIO $ putStrLn $ "/////////////////////////////////"
+  supportCoinsTrueInRound <- newIORef (Map.empty :: Map Int Int)
+  auxInR <- newIORef (Map.empty :: Map PID [Int])
+  estInR <- newIORef (Map.empty :: Map PID [Int])
+  lastAux <- newIORef (Map.empty :: Map PID Int)
+  lastEst <- newIORef (Map.empty :: Map PID Int)
+  whenDecide <- newIORef (Map.empty :: Map PID Int)
+  lastRound <- newIORef 0
+
+
   forMseq_ ll $ \l -> do
     case l of
       Left leaks -> do
@@ -1060,41 +1166,73 @@ testABALemma17Rounds = do
               if r < r' then error $ "getting an earlier round later. r=" ++ show r ++ ", r'=" ++ show r'
               else writeIORef lastRound r
             (sid, ((AUX r b, DeliverTokensWithMessage tk), SendTokens st)) -> do
+              -- skip round 1 messages, they don't count
               let (pidS :: PID, parties :: [PID], sssid :: String) = readNote "SCCMulticast" $ snd sid
-              Just pidSest <- (readIORef estInR) >>= (return . Map.lookup pidS)
-              let estInR = elem r pidSest 
-              Just pidSaux <- (readIORef auxInR) >>= (return . Map.lookup pidS)  
-              let auxInRminus = elem (r-1) pidSaux
-              if (auxInRminus && (not estInR)) then -- this means supportCoin = True
-                modifyIORef supportCoinsTrueInRound (Map.insertWith (+) r 1)
+              if r > 1 then do
+                --liftIO $ putStrLn $ "r>1" 
+                Just pidSest <- (readIORef estInR) >>= (return . Map.lookup pidS)
+                liftIO $ putStrLn $ show pidSest
+                let estInR = elem r pidSest 
+                Just pidSaux <- (readIORef auxInR) >>= (return . Map.lookup pidS)  
+                let auxInRminus = elem (r-1) pidSaux
+                if (auxInRminus && (not estInR)) then do -- this means supportCoin = True
+                  liftIO $ putStrLn $ ("sc=T for " ++ show pidS ++ " in round " ++ show r)
+                  modifyIORef supportCoinsTrueInRound (Map.insertWith (+) r 1)
+                else return ()
               else return ()
               modifyIORef auxInR $ Map.insertWith (++) pidS [r]
               modifyIORef lastAux $ Map.insert pidS r
               r' <- readIORef lastRound
               if r < r' then error $ "getting an earlier round later. r=" ++ show r ++ ", r'=" ++ show r'
               else writeIORef lastRound r
+        --scInR <- (readIORef supportCoinsTrueInRound >>= return. Map.assocs)
+        --forMseq_ scInR $ \(round, numsc) -> do
+        --  if numsc == (length (parties \\ crupts)) then
+        --    liftIO $ putStrLn $ "all sc"
+        --  else return ()
       Right (pid, (ABAF2P_Out b, SendTokens st)) -> do
         -- round of last message (if EST then it's round r else if AUX then r-1)
         Just estr <- (readIORef lastEst >>= return . (Map.lookup pid))
         Just auxr <- (readIORef lastAux >>= return . (Map.lookup pid))
         let r = max estr auxr
         modifyIORef whenDecide $ Map.insert pid r
+      Right (pid, (ABAF2P_Ok, SendTokens st)) ->
+        return ()
+  
+  readIORef estInR >>= liftIO . putStrLn . ("estInR " ++) . show
+  readIORef auxInR >>= liftIO . putStrLn . ("auxInR " ++) . show
 
+  --er <- readIORef estInR
+  --ar <- readIORef auxInR
+  --forMseq_ (parties \\ crupts) $ \p -> do
+  --  let pest = Map.lookup p er
+  --  let paux = Map.lookup p ar    
+  --  liftIO $ putStrLn $ "pd=" ++ show p ++ " pest=" ++ show pest
+  --  liftIO $ putStrLn $ "paux=" ++ show paux
 
-  let roundCoins = Map.fromList [(1, True), (2, True), (3, False), (4, False)]
   -- find the intersection of the rounds 
-  r' <- readIORef lastRound
+  liftIO $ putStrLn $ "Decision rounds: " ++ show decisionRounds
   prounds <- newIORef []
   scInR <- (readIORef supportCoinsTrueInRound >>= return . Map.assocs)
+  liftIO $ putStrLn $ "supportCoin map " ++ show scInR
   decisionRounds <- (readIORef whenDecide >>= return . Map.elems)
+  --liftIO $ putStrLn $ "decision rounds: " ++ show decisionRounds
   forMseq_ scInR $ \(round, numsc) -> do
     if numsc == (length (parties \\ crupts)) then do
+      --liftIO $ putStrLn $ "Checking round " ++ show round ++ " with numsc: " ++ show numsc
       -- all supportCoins are True
       -- did all parties decide this round?
-      let sameRound = foldr (&&) True (map (== round) decisionRounds)
-      let sameCoin = 
+      let (sameRound :: Bool) = (foldr (&&) True (map (== round) decisionRounds)) && ((length decisionRounds) > 0)
+      liftIO $ putStrLn $ "sameRound=" ++ show sameRound
+      let sameCoin = ((roundCoins !! round) == (roundCoins !! (round-1)))
+      liftIO $ putStrLn $ "sameCoin=" ++ show sameCoin
+      liftIO $ putStrLn $ "Round " ++ show round ++ ": " ++ show (roundCoins !! round)
+      liftIO $ putStrLn $ "Round " ++ show (round-1) ++ ": " ++ show (roundCoins !! (round-1))
+      if (not sameRound) && sameCoin then
+        liftIO $ putStrLn $ "\t\t*************Violation of Lemma 17********************"
+      else return ()
     else return ()
-     
+
 
   return () 
   
@@ -1403,6 +1541,8 @@ fABA (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
                     return (numTrue, numFalse)
     let isAdvChoice = do
         countInputs >>= (\(nt, nf) -> return (((nt > t) && (nf > t)), nt, nf))
+ 
+    first <- newIORef True
 
     -- party inputs and schedule decision when inputs from honest parties
     fork $ forever $ do
@@ -1415,7 +1555,10 @@ fABA (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
             
             ready <- readIORef inputs >>= return . ((length parties) ==) . length . Map.keys
             if ready then do
-                b <- ?getBit
+                liftIO $ putStrLn $ "************** choosing randomly in the functionality"
+                -- TODO: change back
+                --b <- ?getBit
+                let b = True
                 isAdvChoice >>= \(u, nt, nf) ->
                        writeIORef decision $ if u then b else if (nt > t) then True else False
 
@@ -1423,7 +1566,10 @@ fABA (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
                     eventually $ do
                       tk <- readIORef tokens
                       writeIORef tokens (tk-1)
-                      (readIORef decision >>= \d -> writeChan f2p (pidX, (ABAF2P_Out d, SendTokens 0)))
+                      d <- readIORef decision
+                      liftIO $ putStrLn $ "Writin out in fABA: " ++ show (pidX, d)
+                      --(readIORef decision >>= \d -> 
+                      writeChan f2p (pidX, (ABAF2P_Out d, SendTokens 0))
                 return ()
             else return ()
             writeChan f2p (pid, (ABAF2P_Ok, SendTokens 0))
@@ -1555,6 +1701,8 @@ simABA (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
    
     -- monitor the sandbox for outputs  
     chanOk <- newChan
+
+    gaveCruptInput <- newIORef False
     
     fork $ forever $ do
         mf <- readChan sbxp2z
@@ -1563,9 +1711,15 @@ simABA (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
             (_pidS, (ABAF2P_Out b, SendTokens tk')) -> do
                 -- simulator just tries to force the bit: give all crupt
                 -- parties b as input and try to force the decision
-                forMseq_ (Map.keys ?crupt) $ \pidC -> do
-                    writeChan a2p (pidC, ClockP2F_Through (b, SendTokens 0))
-                    readChan p2a  --OK messsage
+                liftIO $ putStrLn $ "Simulation party out: " ++ show (_pidS, b)
+                alreadySet <- readIORef gaveCruptInput
+                if not alreadySet then do
+                  forMseq_ (Map.keys ?crupt) $ \pidC -> do
+                      liftIO $ putStrLn $ "giving IDEAL world input to " ++ show pidC
+                      writeChan a2p (pidC, ClockP2F_Through (b, SendTokens 0))
+                      readChan p2a  --OK messsage
+                  writeIORef gaveCruptInput True
+                else return ()
 
                 -- also try to set the bit in fABA just in case
                 writeChan a2f (Right (ABAA2F_Decide b, SendTokens 0))
@@ -1580,15 +1734,18 @@ simABA (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
                     _ -> error "pid that doens't exist"
         return ()
     let handleLeak (pid, (b, SendTokens a)) = do
-        printAdv $ "handleLeak simulator"
+        printAdv $ "handleLeak simulator: " ++ show (pid, b)
         --let (pid, b) = m
-        case b of
-            True -> modifyIORef numTrue (+ 1)
-            False -> modifyIORef numFalse (+ 1)
-        writeChan sbxz2p (pid, (ClockP2F_Through b, SendTokens a))
-        () <- readChan chanOk
-        --() <- readChan sbxpump
-        return ()
+        -- skip if this is a crupt party we gave this input
+        if member pid ?crupt then return ()
+        else do
+          case b of
+              True -> modifyIORef numTrue (+ 1)
+              False -> modifyIORef numFalse (+ 1)
+          writeChan sbxz2p (pid, (ClockP2F_Through b, SendTokens a))
+          () <- readChan chanOk
+          --() <- readChan sbxpump
+          return ()
 
     syncLeaks <- makeSyncLog handleLeak $ do
         writeChan a2f $ Left ClockA2F_GetLeaks
@@ -1610,7 +1767,7 @@ simABA (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
                 SttCruptZ2A_A2P pm -> writeChan a2p' pm
         fork $ forever $ do
             m <- readChan f2a'
-            liftIO $ putStrLn $ show "f2a'" ++ show m
+            --liftIO $ putStrLn $ show "f2a'" ++ show m
             writeChan a2z' $ SttCruptA2Z_F2A m
         fork $ forever $ do
             (pid,m) <- readChan p2a'
@@ -1627,8 +1784,14 @@ simABA (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
         Left m -> writeChan z2a m
         Right m -> writeChan f2a m
 
+
+    -- in Async we can't do this and just halt
+    -- if the functionality passed in the real world then
+    -- the simulator should also pass
     fork $ forever $ do
         () <- readChan sbxpump
+        liftIO $ putStrLn $ "reading pump in sim"
+        ?pass
         return ()
 
     return ()
@@ -1668,40 +1831,40 @@ testEnvSimHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
         () <- readChan pump
         writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
     
-    -- Deliver all EST messages to Bob
-    forMseq_ [0,2,4,6] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    ---- Deliver all EST messages to Bob
+    --forMseq_ [0,2,4,6] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
 
-    -- Deliver all EST messages to Charlie
-    forMseq_ [0,1,2,3] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
-    
-    -- Deliver all EST messages to Mary
-    forMseq_ [0,0,0,0] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    ---- Deliver all EST messages to Charlie
+    --forMseq_ [0,1,2,3] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    --
+    ---- Deliver all EST messages to Mary
+    --forMseq_ [0,0,0,0] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
 
-    -- Deliver all AUX messages to Alice 
-    forMseq_ [0,3,6,9] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
-    
-    -- Deliver all AUX messages to Bob
-    forMseq_ [0,2,4,6] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    ---- Deliver all AUX messages to Alice 
+    --forMseq_ [0,3,6,9] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    --
+    ---- Deliver all AUX messages to Bob
+    --forMseq_ [0,2,4,6] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
 
-    -- Deliver all AUX messages to Charlie
-    forMseq_ [0,1,2,3] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
-    
-    -- Deliver all AUX messages to Mary
-    forMseq_ [0,0,0,0] $ \x -> do
-        () <- readChan pump
-        writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    ---- Deliver all AUX messages to Charlie
+    --forMseq_ [0,1,2,3] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
+    --
+    ---- Deliver all AUX messages to Mary
+    --forMseq_ [0,0,0,0] $ \x -> do
+    --    () <- readChan pump
+    --    writeChan z2a $ ((SttCruptZ2A_A2F $ (Left (ClockA2F_Deliver x))), SendTokens 0)
 
     () <- readChan pump
     writeChan outp =<< readIORef transcript

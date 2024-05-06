@@ -168,7 +168,7 @@ idealProtocolToken (z2p, p2z) (f2p, p2f) = do
 --
 --bangFAsyncToken
 --    :: MonadFunctionalityAsync m ((SID, l), CarryTokens Int) =>
---	:: MonadFunctionalityAsync m (SID, l) 
+--  :: MonadFunctionalityAsync m (SID, l) 
 --       (forall m'. MonadFunctionalityAsync m' l => Functionality p2f f2p a2f f2a Void Void m') -> 
 --       Functionality ((SID, p2f), CarryTokens Int) ((SID, f2p), CarryTokens Int) ((SID, a2f), CarryTokens Int) (SID, f2a) Void Void m 
 --bangFAsyncToken f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do

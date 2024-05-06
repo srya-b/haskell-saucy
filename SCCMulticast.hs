@@ -66,6 +66,7 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
             ?leak ((m, DeliverTokensWithMessage st), SendTokens a)
             forMseq_ parties $ \pidR -> do
               eventually $ do
+                liftIO $ putStrLn $ "eventually doing SCC send"
                 tk <- readIORef tokens
                 if (tk >= 1)  then do
                   --require (tk >= st) ("Not enough tokens. Need " ++ show st ++ ", have " ++ showf)
@@ -85,7 +86,11 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           --else readChan =<< newChan
           cf <- readIORef coinFlips
           if not $ member r cf then do
-            b <- ?getBit
+            -- TODO: change to be bias
+            -- P[0] = 1/4 P[1] = 3/4
+            --b <- ?getBit
+            bn <- getNbits 2
+            let b = if bn==1 then False else True
             liftIO $ putStrLn $ "coin if not member"
             modifyIORef coinFlips $ Map.insert r b
             writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
@@ -105,11 +110,14 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           del <- readIORef delivered
           --if member pidR del then return ()
           if member pidR del then do
+            liftIO $ putStrLn $ "receiver already had something delivered in this instance"
             ?pass
           else do
+            liftIO $ putStrLn $ "coin case deliverY"
             tks <- readIORef tokens
             if  (tks >= st) then do 
             --require (tks >= st) ("not enough tokens. need " ++ show st ++ ", have " ++ show tks)
+              liftIO $ putStrLn $ "delivering"
               modifyIORef tokens $ (subtract st)
               modifyIORef delivered $ Map.insert pidR ()
               writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens st))

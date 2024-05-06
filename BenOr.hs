@@ -31,7 +31,7 @@ data BenOrMsg = One RoundNo Bool | Two RoundNo | TwoD RoundNo Bool deriving (Sho
 
 
 -- Give (fBang fMulticast) a nicer interface
-manyMulticast :: MonadProtocol m =>
+manyMulticast :: (Show t, MonadProtocol m) =>
      PID -> [PID]
      -- -> (Chan (SID, (MulticastF2P t, TransferTokens Int)), Chan (SID, ((t, TransferTokens Int), CarryTokens Int)))
      -> (Chan (SID, (MulticastF2P t, CarryTokens Int)), Chan (SID, ((t, TransferTokens Int), CarryTokens Int)))
@@ -46,6 +46,7 @@ manyMulticast pid parties (f2p, p2f) = do
   fork $ forMseq_ [0..] $ \(ctr :: Integer) -> do
        m <- readChan p2f'
        let ssid = (show ctr, show (pid, parties, ""))
+       liftIO $ putStrLn $ "writing to fMulticast " ++ show m
        writeChan p2f (ssid, m)
 
   -- Handle reading (messages delivered in any order)
@@ -270,10 +271,12 @@ protBenOrBroken oneThreshold sendTwoDThreshold decideThreshold decideWhich state
               if (nt0 >= (sendTwoDThreshold)) then do
                 writeIORef decision False
                 newRoundFrom r
+                liftIO $ putStrLn $ "nt0 returning from istime"
                 return True
               else if (nt1 >= (sendTwoDThreshold)) then do
                 writeIORef decision True
                 newRoundFrom r
+                liftIO $ putStrLn $ "nt1 returning from istime"
                 return True
               else do
                 b <- ?getBit
@@ -389,6 +392,7 @@ protBenOrBroken oneThreshold sendTwoDThreshold decideThreshold decideWhich state
                     d <- readIORef decision
                     writeIORef decided True
                     writeIORef alreadyOned False
+                    liftIO $ putStrLn $ "delivering output"
                     writeChan p2z (BenOrF2P_Deliver d)
                   else ?pass
                 else ?pass
@@ -411,7 +415,7 @@ testEnvBenOr numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.empty
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
  
@@ -498,7 +502,7 @@ testEnvBreak numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.empty
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
                           Two r -> (2,r,False)
@@ -724,7 +728,7 @@ testEnvBenOrCrupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   liftIO $ putStrLn $ "Stuck even before sid crupt"
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Frank",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   liftIO $ putStrLn $ "Stuck after envReadOut"
   () <- readChan pump
@@ -848,7 +852,7 @@ fABA (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           nf <- numFalse
           if nt > nf then writeIORef decision True else writeIORef decision False
         -- eventually give it to all honest parties
-        forMseq_ honest $ \pidH -> do
+        forMseq_ parties $ \pidH -> do
           eventually $ do
             (readIORef decision >>= \d -> writeChan f2p (pidH, BenOrF2P_Deliver d))
       else return ()
@@ -938,10 +942,13 @@ simBenOr (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
   fork $ forever $ do
     mf <- readChan sbxp2z
     case mf of
-      (_pidS, BenOrF2P_OK) -> writeChan chanOk ()
+      (_pidS, BenOrF2P_OK) -> do
+        liftIO $ putStrLn $ "sbxp2z OK"
+        writeChan chanOk ()
       (_pidS, BenOrF2P_Deliver b) -> do
         -- don't need to care about crupt input
         -- optimistically try to give bit b
+        liftIO $ putStrLn $ "sbxp2z " ++ show mf
         writeChan a2f (Right (BenOrA2F_Decide b, SendTokens 0))
         --writeChan a2p ("TODO" :: PID, ClockP2F_Through (BenOrP2F_Input True, SendTokens 0)) 
         --readChan p2a
@@ -952,6 +959,7 @@ simBenOr (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
         case idx of
           Just x -> do
             modifyIORef partiesToDeliver (deleteNth x)
+            liftIO $ putStrLn $ "deciding that partie's output"
             writeChan a2f (Left (ClockA2F_Deliver x))
           _ -> error "pid to deliver doesn't exist"
         return ()
@@ -987,7 +995,7 @@ simBenOr (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
               SttCruptZ2A_A2P pm -> writeChan a2p' pm
       fork $ forever $ do
           m <- readChan f2a'
-          --liftIO $ putStrLn $ show "f2a'" ++ show m
+          liftIO $ putStrLn $ show "f2a'" ++ show m
           writeChan a2z' $ SttCruptA2Z_F2A m
       fork $ forever $ do
           (pid,m) <- readChan p2a'
@@ -1027,7 +1035,7 @@ testEnvSimHonest numTokens z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   --writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.empty
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   let valueFilter msg = case msg of
                           One r b -> (1,r,b)
                           Two r -> (2,r,False)

@@ -86,3 +86,14 @@ A=? B=T C=T D=F E=F F=F
 
 
 
+
+
+estInR fromList [("Alice",[2,1,1]),("Bob",[2,1,1]),("Charlie",[2,1,1]),("Dave",[2,1,1]),("Eve",[2,1,1]),("Frank",[2,1,1])]
+auxInR fromList [("Alice",[3,2,1]),("Bob",[3,2,1]),("Charlie",[3,2,1]),("Dave",[3,2,1]),("Eve",[3,2,1]),("Frank",[3,2,1])]
+supportCoin map [(2,6),(3,6)]
+
+estInR fromList [("Alice",[1,1,2]),("Bob",[1,1,2]),("Charlie",[1,1,2]),("Dave",[1,1,2]),("Eve",[1,1,2]),("Frank",[1,1,2])]
+auxInR fromList [("Alice",[1,2]),("Bob",[1,1,2]),("Charlie",[1,1,2]),("Dave",[1,1,2]),("Eve",[1,1,2]),("Frank",[1,1,2])]
+scInR [(3,6)]
+
+

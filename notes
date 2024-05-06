@@ -13,10 +13,6 @@ if you don't have SID prefixes and allow F to discriminate
 then you're modelling sandbox that doesn't support isolation at all
 so they can tap into sockets of other client communication
 
-lemma 17
---------
-how to recognize a particular round? AUX message will always be broadcast or 
-
 What have we done design wise?
 -------------------------------
 The adversary never sends tokens to fMulticast when delivering a message to someone, i.e. never pays for it
@@ -329,4 +325,62 @@ definitions as a beneficial goal (which is obvious). Already pointed out that id
 Simulator proofs can also be validated (TBD) making literature more usable and falsifiable (borrow reasoning from literature about PL tools for UC).
 
 ** also good to discover new lemma / properties about the protocol that can be rapidly tested ==> validates proofs / properties  
+
+
+we show that fuzz testing is compatible with it
+type checking is useful in some way
+we're validating whether or not UC can be compatible with these techniques
+    we want to consider a technique that has wide coverage, success, and is a sufficient technique to showcase it's amenabaility to software dev
+
+we've gone through the design process
+    - this is along the work to remove some flexibilithy we're trying to simplify things in UC that lead to simple programming
+    -  like the eventual execution => things don't need to be complicated
+besides the tooling we're unique in focusinng on distributed systems for UC ==> it's also compatible with this kind of protocol and its fault model concerns
+    - 
+
+on the point of work required (engineering effort) to capture the model
+- this isn't inherent to fuzzing but just jepsen and we aren't doing these comparitive  battles 
+
+
+the reason for UC in distributes (the mentioned ones of adversarial modelling) we don't need to justify for UC for distributed systems (starting conditions assumed to exist inputs, problems with property definitions, replay attacks,...)
+    - in the distributed systems there's a priority on the implementation (applied crypto aren't using it to implement crypto proof but to use UC to organize their implementations) we're validating that it's at least possible to do this!!!!!!!!
+
+how to present the data of the case studies
+    - each case study what can we show and what do we show
+    - the injected errors is the strongest thing we can say about them (we can't guarantee they are representative of real errors on the other hand we can describe them) and we do talk about coverage (safety and liveness, missed parameter sizes, etcc they cover the span of faults)
+    - 
+
+this lemma thing is just an overall thing that's true with fuzz testing
+    - you might think you are forced into an all or nothing where you violate the ideal world or not but we can still express properties that are not just differences in the ideal/real comparison
+    - keep in mind the connection to UC --> this kind of fuzzing/lemma definition --> all of this could be possible outside UC  
+    - the point isn't that this is possible only because we're using UC for the overall definition (ideal world model) doesn't mean that's the only analysis you get to do
+
+here's an adaptor for any Z that fails to satisfy this lemma, here's a way of proving that it will eventually be distinguishable from the ideal world
+    - like the connection from fuzzing without ideal world to show we encounter a violation of the lemma but even use a simulator to show the connection between that and the ideal distinguishing
+    - defining a livelock you enter the same state over and over again => it counts as distinguishing if the real world reaches the same state that it was in
+        -> can the environment tell that the parties are in the same state but then there's a suffix of execution that eventually distinguishes them but that's not something the environment can observe
+
+correspondence between an on-paper and implementation of a protocol
+    - that gives a satisfying story of where the property checking comes from in the paper
+    - 
+
+on the topic of injected faults that should cause a failure but we don't catch them
+an interesting statement is if we're saying something about the coverage of fuzz testing on a range of fault types
+    - but this is just about fuzz testing and distributed protocols in general and way off from anything UC related
+    - our population is real faults and injected faults are proxy for those in some way
+    - there are some injected faults of a certain kind (they have this quality) what do we say about cases where round number errors don't present themselves as safety violations or liveness violations and we don't talk about the ones we can't catch
+
+you can't monitor for a liveness failure
+    - we need some other approach to empiricallt catch liveness errors (don't have to treat is as a new point)
+    - any system that tries liveness checking it makes sense the approach to this (related work?) you can define lemmas that are indicative of a failure like reaching a state that you have previously reached
+    - uc is compatible for fuzz testing for liveness: it required defining a checker for a predicate that indicated a liveness failure, that's where this lemma is leading
+            -> this is compatible with UC: testing this UC implementation uses this approach with a lemma even if it's not in the ideal world (just because we have an ideal world and a use for it doesn't mean that this is the only place you can apply analysis) 
+
+
+
+
+Checking for live lock in ABA
+=============================
+* in ABA the state variables are: bin_ptr, s_i, supportCoin and they uniquely determine the state of the party
+    - EST(F) => (supportCoin = False, scc = True) => view[r-1] = {False} => binPtr[F] = true and binPtr[T] = false (Could be True afterwrads)
 

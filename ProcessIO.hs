@@ -210,6 +210,7 @@ runRandReplay bits p = do
   ref <- newIORef bits
   let ?getBit = do
         br <- readIORef ref
+        liftIO $ putStrLn $ "br: " ++ show br
         let (bit : rest) = br
         writeIORef ref rest
         return bit

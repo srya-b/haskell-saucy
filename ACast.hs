@@ -34,7 +34,6 @@ data ACastTVariant = ACastTSmall | ACastTLarge | ACastTCorrect deriving (Show, E
 data ACastRVariant = ACastRSmall | ACastRLarge | ACastRCorrect deriving (Show, Eq)
 data ACastDVariant = ACastDSmall | ACastDLarge | ACastDCorrect deriving (Show, Eq)
 
-
 fACast :: MonadFunctionalityAsync m a => Functionality (ACastP2F a) (ACastF2P a) Void Void Void Void m
 fACast (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
   -- Sender, set of parties, and tolerance parameter is encoded in SID
@@ -61,7 +60,7 @@ fACast (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
     else do
       return()
 
-	-- give control back to the calling party after the input is accepted
+  -- give control back to the calling party after the input is accepted
   writeChan f2p (pidS, ACastF2P_OK)
 
 -- Same as the functionality above but augmented with import tokens
@@ -82,7 +81,7 @@ fACastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
 
   -- Allow sender to choose the input
   (pid, ((ACastP2F_Input m), SendTokens a)) <- readChan p2f
-	-- TODO: at the moment we manually update import in the code rather than doing it within MonadITM
+  -- TODO: at the moment we manually update import in the code rather than doing it within MonadITM
   if a>=0 then do
     tk <- readIORef tokens
     writeIORef tokens (tk+a)
@@ -99,7 +98,7 @@ fACastToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
     if not (Map.member pj ?crupt) then do
       eventually $ do
         tk <- readIORef tokens
-        if tk >=1 then do		-- require 1 token for each receiver
+        if tk >=1 then do   -- require 1 token for each receiver
           writeIORef tokens (tk-1)  -- Burn 1 token for delivery
           liftIO $ putStrLn $ "[fACast]: tokens left: " ++ (show (tk-1))
           liftIO $ putStrLn $ "[fACast]: queued party: " ++ (show pj)
@@ -230,7 +229,7 @@ testEnvACast z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestACast", show ("Alice", ["Alice", "Bob", "Carol", "Dave"], 1::Integer, ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid Map.empty
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   -- Have Alice write a message
   () <- readChan pump
@@ -302,9 +301,9 @@ protACastBroken variantT variantR variantD (z2p, p2z) (f2p, p2f) = do
   z2p' <- newChan
   failed <- newIORef False
 
-	-- new require where the machine halts after a require check has failed
-	-- a global flag `failed` is used and if set, activation just gives control
-	-- back to the environment with ?pass
+  -- new require where the machine halts after a require check has failed
+  -- a global flag `failed` is used and if set, activation just gives control
+  -- back to the environment with ?pass
   let require cond msg = do
         if not cond then do
           liftIO $ putStrLn $ msg
@@ -375,6 +374,9 @@ protACastBroken variantT variantR variantD (z2p, p2z) (f2p, p2f) = do
            -- liftIO $ putStrLn $ "[protACast]: multicast done"
            writeChan p2z ACastF2P_OK
          else return ()
+
+  let gprint s = do 
+              liftIO $ putStrLn $ "\ESC[32m [" ++ show ?pid ++ "] " ++ show s ++ "\ESC[0m"
 
   let n = length parties
   -- let thresh = ceiling (toRational (n+t+1) / 2) -- normal ECHO threshold
@@ -475,8 +477,9 @@ protACastBroken variantT variantR variantD (z2p, p2z) (f2p, p2f) = do
                 return()
               liftIO $ putStrLn $ "[protACast] " ++ show ?pid ++ " returned from multicast"
               if ct == decideThresh then do
-                --liftIO $ putStrLn $ "<><><><><> [protACast] " ++ ?pid ++ " decided already"
+                gprint ("<><><><><> [protACast] " ++ ?pid ++ " decided already")
                 writeIORef decided True
+              
                 writeChan p2z (ACastF2P_Deliver v)
               else ?pass
           else return ()
@@ -507,7 +510,7 @@ testEnvACastBrokenValidity z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
 
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Dave",())]
   
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   writeChan z2p ("Alice", ((ClockP2F_Through $ ACastP2F_Input "1"), SendTokens 100))
@@ -553,7 +556,7 @@ testEnvACastBrokenAgreement z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = 
 
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   writeChan z2a $ ((SttCruptZ2A_A2F $ Right (ssidAlice1, (MulticastA2F_Deliver "Bob" (ACast_VAL "1"), DeliverTokensWithMessage 8))), SendTokens 24)
@@ -604,7 +607,7 @@ testEnvACastBrokenReliability z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp 
     
   writeChan z2exec $ SttCrupt_SidCrupt sid $ Map.fromList [("Alice",())]
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
 
   () <- readChan pump
   writeChan z2a $ ((SttCruptZ2A_A2F $ Right (ssidAlice1, (MulticastA2F_Deliver "Bob" (ACast_VAL "1"), DeliverTokensWithMessage 8))), SendTokens 21)
@@ -665,7 +668,7 @@ testEnvACastBrokenTermination z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp 
   
   writeChan z2exec $ SttCrupt_SidCrupt sid Map.empty
 
-  (lastOut, transcript, clockChan) <- envReadOut p2z a2z
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
   
   -- Have Alice write a message
   () <- readChan pump
@@ -730,8 +733,8 @@ testACastBroken = runITMinIO 120 $ execUC
 testCompareBrokenAgreement :: IO Bool
 testCompareBrokenAgreement = runITMinIO 120 $ do
   let variantT = ACastTSmall
-  let variantR = ACastRCorrect
-  let variantD = ACastDCorrect
+  let variantR = ACastRSmall
+  let variantD = ACastDSmall 
   let prot () = protACastBroken variantT variantR variantD
   liftIO $ putStrLn "*** RUNNING REAL WORLD ***"
   t1R <- runRandRecord $ execUC
