@@ -215,6 +215,10 @@ envReadOut _p2z _a2z = do
         modifyIORef ctr (+ length tail)
         modifyIORef leakLimited $ (++ [Left tail]) 
         ?pass
+      SttCruptA2Z_F2A (Left ClockF2A_Pass) -> do
+        liftIO $ putStrLn $ "Pass"
+        writeIORef lastOut (Just (Left m))
+        ?pass
       _ -> do 
         writeIORef lastOut (Just (Left m))
         ?pass

@@ -107,16 +107,12 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
         l <- readIORef leaks
         writeChan f2a $ (Left $ ClockF2A_Leaks l)
       Left (ClockA2F_Deliver idx) -> do
-                     liftIO $ putStrLn $ "delivering " ++ show idx
                      q <- readIORef runqueue
                      if (length q) > idx then do
-                       liftIO $ putStrLn $ "Queue Size: " ++ (show (length q))
                        rq <- readIORef runqueue
-                       liftIO $ putStrLn $ "delivering"
                        modifyIORef runqueue (deleteNth idx)
                        writeChan (q !! idx) ()
                      else do
-                      liftIO $ putStrLn $ "len q <= idx: " ++ show (length q)
                       writeChan f2a $ Left ClockF2A_Pass
                        -- pass
       Left (ClockA2F_Delay rounds) -> do

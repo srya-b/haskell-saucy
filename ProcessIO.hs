@@ -87,7 +87,8 @@ wrapWrite f c = do
   return d
 
 forward cin cout = do
-  fork $ forever $ readChan cin >>= writeChan cout
+  fork $ forever $ do
+    readChan cin >>= writeChan cout
 
 wrapRead f c = do
   d <- newChan
@@ -210,7 +211,6 @@ runRandReplay bits p = do
   ref <- newIORef bits
   let ?getBit = do
         br <- readIORef ref
-        liftIO $ putStrLn $ "br: " ++ show br
         let (bit : rest) = br
         writeIORef ref rest
         return bit
