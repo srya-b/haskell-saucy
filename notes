@@ -384,3 +384,65 @@ Checking for live lock in ABA
 * in ABA the state variables are: bin_ptr, s_i, supportCoin and they uniquely determine the state of the party
     - EST(F) => (supportCoin = False, scc = True) => view[r-1] = {False} => binPtr[F] = true and binPtr[T] = false (Could be True afterwrads)
 
+
+data FlipP2F = FlipP2F_start
+data FlipF2P = FlipF2P_flip
+
+data ChanP2F a = ChanP2F_m a 
+data ChanF2P a = CHanF2P_m a
+
+fCoinFlip 
+    p2f :: Chan (Either FlipP2F (ChanP2F a))
+    f2p :: Chan (Either FlipF2P (ChanF2P a))
+
+protCoinFlip
+    z2p :: Chan (Either FlipP2F (ChanP2F a))
+    p2z :: Chan (Either FlipF2P (ChanF2P a))
+
+    p2f :: Chan (RoP2F (Int,Bool) (Either a ProtFlip_Msg))
+    f2p :: Chan (RoF2P (Either a ProtFlip_Msg))
+
+
+    toProt <- newChan
+    fromProt <- newChan
+    toFunc <- newChan
+    fromFunc <- newChan
+
+    fork $ forever $ do
+        mf <- readChan f2p
+        case mf of
+            RoF2P_m (Left m) -> writeChan p2z (Right $ ChanF2P_m m)
+            RoF2P_m (Right m) -> writeChan fromProt (RoF2P_m m)
+
+    fork $ forever $ do
+        mf <- readChan z2p
+        case mf of
+            Left m -> writeChan toProt m
+            Right m -> writeChan p2f $ RoP2F_m (Left m)
+    
+    fork $ forever $ do
+        mf <- readCHan 
+
+
+    b <- ?getBit   
+    nonce <- getNbits 120
+    writeChan p2f $ RoP2F_ro (nonce, b)
+    RoF2P_ro h <- readChan f2p
+    
+    writeChan p2f $ RoP2F_m (Right $ ProtFlip_commit h)
+
+-- Receiver
+    fork $ forever $ do
+       
+
+    
+
+
+protLottery 
+    p2f :: Chan (Either LotteryP2F (ChanP2F LotteryMsg))
+    f2p :: Chan (EIther LotteryF2P (ChanF2P LotteryMsg))
+    
+fCoinChan (a = LotteryMsg)
+
+compose:
+    

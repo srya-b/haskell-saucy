@@ -23,51 +23,28 @@ import qualified Data.Map.Strict as Map
 
 import TestTools (envReadOut, envMapQueue, intersect, deliverListAll, envQueueSize)
 
+--data CoinFlipP2F m = FlipP2F_start | FlipP2F_m m deriving (Show, Eq)
+--data CoinFlipF2P m = FlipF2P_coin Bool | FlipF2P_ok | FlipF2P_m m deriving (Show, Eq)
+data CoinFlipP2F = FlipP2F_start deriving (Show, Eq)
+data CoinFlipF2P = FlipF2P_coin Bool | FlipF2P_ok deriving (Show, Eq)
 
-data CoinFlipP2F m = FlipP2F_start | FlipP2F_m m deriving (Show, Eq)
-data CoinFlipF2P m = FlipF2P_coin Bool | FlipF2P_ok | FlipF2P_m m deriving (Show, Eq)
---data CoinFlipA2F = FlipA2F_input deriving (Show, Eq)
---data CoinFlipF2A = FlipF2A_start PID deriving (Show, Eq)
+data ChanP2F a = ChanP2F_m a deriving (Show, Eq)
+data ChanF2P a = ChanF2P_m a deriving (Show, Eq)
 
 -- TODO: should F2P output that the other party started?
-type CoinFlipTranscript = [Either
-                          (SttCruptA2Z (RoF2P ProtFlip_Msg)
-                                       (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-                          (PID, CoinFlipF2P ProtFlip_Msg)]
-
-
-fCoinFlipFair :: MonadFunctionalityAsync m (CoinFlipF2A) =>
-  Functionality (CoinFlipP2F a) (CoinFlipF2P a) Void Void Void Void m --CoinFlipA2F CoinflipF2A Void Void m
-fCoinFlipFair (p2f, f2p) _ _ = do
-  let sid = ?sid :: SID
-  let (pidA :: PID, pidB :: PID, sssid :: String) = readNote "fMulticast" $ snd sid
-  startA <- newIORef False
-  startB <- newIORef False
-  forever $ do
-    (pid, mf) <- readChan p2f
-    case mf of
-      FlipP2F_m m | pid == pidA -> eventually $ writeChan f2p (pidB, FlipF2P_m m)
-                  | pid == pidB -> eventually $ writeChan f2p (pidA, FlipF2P_m m)
-      FlipP2F_start -> do
-        a <- readIORef startA 
-        b <- readIORef startB
-        if a && (pid == pidA) then writeIORef startA True
-        else if b && (pid == pidB) then writeIORef startB True
-        else error "Not A or B start msg"
-        
-        a <- readIORef startA
-        b <- readIORef startB
-        if a && b then do
-          b <- ?getBit
-          eventually $ writeChan f2p (pidA, FlipF2P_coin b)
-          eventually $ writeChan f2p (pidB, FlipF2P_coin b)
-        else return ()
+type CoinFlipTranscript a = [Either
+                          (SttCruptA2Z (RoF2P (Either a ProtFlip_Msg))
+                                       (Either (ClockF2A (PID, Either a ProtFlip_Msg)) Void))
+                          (PID, Either CoinFlipF2P (ChanF2P a))]
 
 data CoinFlipA2F = FlipA2F_DeliverA | FlipA2F_DeliverB deriving (Show, Eq)
 data CoinFlipF2A = FlipF2A_Flip Bool deriving (Show, Eq)
 
-fCoinFlipUnfair :: MonadFunctionalityAsync m (PID, CoinFlipP2F a) =>
-  Functionality (CoinFlipP2F a) (CoinFlipF2P a) CoinFlipA2F CoinFlipF2A Void Void m
+--fCoinFlipUnfair :: MonadFunctionalityAsync m (PID, CoinFlipP2F a) =>
+fCoinFlipUnfair :: MonadFunctionalityAsync m (Either (PID, CoinFlipP2F) (PID, ChanP2F a))  =>
+  Functionality (Either CoinFlipP2F (ChanP2F a)) (Either CoinFlipF2P (ChanF2P a))
+                CoinFlipA2F CoinFlipF2A Void Void m
+  --Functionality (CoinFlipP2F a) (CoinFlipF2P a) CoinFlipA2F CoinFlipF2A Void Void m
 fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
   let sid = ?sid :: SID
   let (pidA :: PID, pidB :: PID, sssid :: String) = readNote "fMulticast" $ snd sid
@@ -76,27 +53,39 @@ fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
   ready <- newIORef False
   bit <- newIORef False
 
+  msgChan :: Chan (PID, ChanP2F a) <- newChan
+  funcChan :: Chan (PID, CoinFlipP2F) <- newChan
   fork $ forever $ do
     (pid, mf) <- readChan p2f
     case mf of
-      FlipP2F_m m | pid == pidA -> writeChan f2p (pidB, FlipF2P_m m)
-                  | pid == pidB -> writeChan f2p (pidA, FlipF2P_m m)
-      FlipP2F_start -> do
-        a <- readIORef startA 
-        b <- readIORef startB
-        if (not a) && (pid == pidA) then writeIORef startA True
-        else if (not b) && (pid == pidB) then writeIORef startB True
-        else error "Not A or B start msg"
-        ?leak (pid, mf)
-        
-        a <- readIORef startA
-        b <- readIORef startB
-        if a && b then do
-          b <- ?getBit
-          writeIORef bit b
-          writeIORef ready True
-        else return ()
-        writeChan f2p (pid, FlipF2P_ok)
+      Left m -> writeChan funcChan (pid, m)
+      Right m -> writeChan msgChan (pid, m)
+
+  fork $ forever $ do
+    (pid, FlipP2F_start) <- readChan funcChan
+    a <- readIORef startA 
+    b <- readIORef startB
+    if not a && (pid == pidA) then writeIORef startA True
+    else if not b && (pid == pidB) then writeIORef startB True
+    else error "Not A or B start msg"
+    ?leak (Left (pid, FlipP2F_start))
+    
+    a <- readIORef startA
+    b <- readIORef startB
+    if a && b then do
+      b <- ?getBit
+      writeIORef bit b
+      writeIORef ready True
+    else return ()
+    writeChan f2p (pid, Left FlipF2P_ok)
+
+  fork $ forever $ do
+    (pid, ChanP2F_m m) <- readChan msgChan 
+    ?leak (Right (pid, ChanP2F_m m))
+    case () of
+      _ | pid == pidA -> eventually $ writeChan f2p (pidB, Right $ ChanF2P_m m)
+      _ | pid == pidB -> eventually $ writeChan f2p (pidA, Right $ ChanF2P_m m)
+    writeChan f2p (pid, Left FlipF2P_ok)
 
   fork $ forever $ do
     m <- readChan a2f
@@ -106,10 +95,32 @@ fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
       case m of
         -- we don't do eventually here because we don't want to deliver both eventually
         -- adv has complte control who gets any output
-        FlipA2F_DeliverA -> writeChan f2p (pidA, FlipF2P_coin b)
-        FlipA2F_DeliverB -> writeChan f2p (pidB, FlipF2P_coin b)
+        FlipA2F_DeliverA -> writeChan f2p (pidA, Left $ FlipF2P_coin b)
+        FlipA2F_DeliverB -> writeChan f2p (pidB, Left $ FlipF2P_coin b)
     else ?pass
   return ()
+  --fork $ forever $ do
+  --  (pid, mf) <- readChan p2f
+  --  case mf of
+  --    FlipP2F_m m | pid == pidA -> writeChan f2p (pidB, FlipF2P_m m)
+  --                | pid == pidB -> writeChan f2p (pidA, FlipF2P_m m)
+  --    FlipP2F_start -> do
+  --      a <- readIORef startA 
+  --      b <- readIORef startB
+  --      if (not a) && (pid == pidA) then writeIORef startA True
+  --      else if (not b) && (pid == pidB) then writeIORef startB True
+  --      else error "Not A or B start msg"
+  --      ?leak (pid, mf)
+  --      
+  --      a <- readIORef startA
+  --      b <- readIORef startB
+  --      if a && b then do
+  --        b <- ?getBit
+  --        writeIORef bit b
+  --        writeIORef ready True
+  --      else return ()
+  --      writeChan f2p (pid, FlipF2P_ok)
+
 --
 makeSyncLog handler req = do
   ctr <- newIORef 0
@@ -122,247 +133,253 @@ makeSyncLog handler req = do
         return ()
   return syncLog
 --
-simFlip :: MonadAdversary m => Adversary 
-  (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
-                (Either ClockA2F Void))
-  (SttCruptA2Z (RoF2P ProtFlip_Msg)
-               (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-  (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-  (Either (ClockF2A (PID, CoinFlipP2F ProtFlip_Msg)) CoinFlipF2A)
-  (Either ClockA2F CoinFlipA2F) m
-simFlip (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
-  let sid = ?sid :: SID
-  let (pidA :: PID, pidB :: PID, sssid :: String) = readNote "fMulticast" $ snd sid
-
-  a2s <- newChan
-  a2r <- newChan
-  
-  table <- newIORef (Map.empty :: (Map (Int, Bool) Int))
-  backtable <- newIORef (Map.empty :: (Map Int (Int, Bool)))
-  comh <- newIORef Nothing
-
-  z2a' <- newChan
-  --fork $ forever $ do
-  --  mh <- readChan z2a
-  --  liftIO $ putStrLn $ "sim: readChhan on z2a"
-  --  case mh of 
-  --    SttCruptZ2A_A2P (pid, m) | pid == pidA -> do
-  --                                liftIO $ putStrLn $ "sim: z2a a2p A : " ++ show m
-  --                                writeChan a2s m
-  --                             | pid == pidB -> do
-  --                                liftIO $ putStrLn $ "sim: z2a a2p B : " ++ show m
-  --                                writeChan a2r m
-  --    _ -> writeChan z2a' mh
-  --    -- the Right of the case is Void so we don't care about it
-        
-  let functionality (p2f', f2p') (a2f', f2a') (z2f', f2z') = do
-            fork $ forever $ do
-              (pid, mf) <- readChan p2f'
-              liftIO $ putStrLn $ "sim_F: message " ++ show mf
-              case mf of
-                RoP2F_Ro (nonce, b) -> do
-                  tbl <- readIORef table
-                  if not $ member (nonce, b) tbl then do
-                    h :: Int <- getNbits 120
-                    modifyIORef table     (Map.insert (nonce,b) h)
-                    modifyIORef backtable (Map.insert h (nonce,b)) 
-                  else return ()
-                  tbl <- readIORef table
-                  writeChan f2p' (pid, RoF2P_Ro (tbl ! (nonce, b)))
-                  --writeChan a2 (SttCruptA2Z_P2A (pidA, RoF2P_Ro (tbl ! (nonce, b))))
-                RoP2F_m m -> do
-                  if pid == pidA then do 
-                    ?leak (pid, m) 
-                    eventually $ writeChan f2p' (pidB, RoF2P_m m)
-                    writeChan f2p' (pid, RoF2P_Ok)
-                  else if pid == pidB then do
-                    ?leak (pid, m)
-                    eventually $ writeChan f2p' (pidA, RoF2P_m m)
-                    writeChan f2p' (pid, RoF2P_Ok)
-                  else ?pass
-            return ()
-
-  sbxp2z <- newChan
-  sbxz2p <- newChan
-  sbxz2f <- newChan
-  sbxpump <- newChan
-  chanOk <- newChan
-
-  let sbxEnv z2exec (p2z', z2p') (a2z', z2a') (f2z', z2f') pump' outp' = do
-          liftIO $ putStrLn $ "Going to write crup to sim execuc"
-          writeChan z2exec $ SttCrupt_SidCrupt ?sid ?crupt
-          -- if sender is crupt: simulator outputs random bit received by the receiver and that's it
-          -- also wait wait for the simulation to output and then make the crupt sender also init
-
-          forward p2z' sbxp2z
-          forward sbxz2p z2p'
-
-          forward z2a z2a'
-          forward a2z' a2z
-  
-          forward sbxz2f z2f'
-          
-          forward pump' sbxpump
-    
-          return ()
-
-  let handleLeak (pid, m) = do
-            if member pid ?crupt then return ()
-            else do
-              case m of
-                FlipP2F_start -> do
-                  -- give start to the internal pid as well
-                  liftIO $ putStrLn $ "sim: start leak for " ++ show pid
-                  writeChan sbxz2p (pid, ClockP2F_Through FlipP2F_start)
-                  readChan chanOk
-                  -- this always results in a ?pass
-                _ -> error "shouldn't ever be leaked"
-            return ()
-
-  syncLeaks <- makeSyncLog handleLeak $ do
-      writeChan a2f $ (Left ClockA2F_GetLeaks)
-      mf <- readChan f2a
-
-      let Left (ClockF2A_Leaks leaks) = mf
-      return leaks
-
-  let sbxAdv (z2a', a2z') (p2a', a2p') (f2a', a2f') = do
-          fork $ forever $ do
-            mf <- readChan z2a'
-            printAdv $ "Intercepted z2a' " ++ show mf
-            syncLeaks
-            printAdv $ "forwarding into the sandbox" 
-            case mf of
-              SttCruptZ2A_A2F f -> writeChan a2f' f
-              SttCruptZ2A_A2P pm -> writeChan a2p' pm
-          fork $ forever $ do
-            m <- readChan f2a'
-            writeChan a2z $ SttCruptA2Z_F2A m
-          fork $ forever $ do
-            (pid, m) <- readChan p2a'
-            writeChan a2z' $ SttCruptA2Z_P2A (pid, m)
-          return ()
-
-  if member pidA ?crupt then do
-    -- if the sender is crupt only simulate the bit that was received from honest receiver
-    fork $ forever $ do
-      (_pidB, mf) <- readChan sbxp2z
-      case mf of 
-        FlipF2P_coin b -> do
-          -- implies honest party has already started
-          writeChan a2p (pidA, ClockP2F_Through FlipP2F_start)
-          -- this write results in f2a write from functionality
-          ma <- readChan p2a
-          let (pidB, FlipF2P_ok) = ma
-          -- not we deliver pidB
-          writeChan a2f (Right FlipA2F_DeliverB)
-        FlipF2P_ok -> writeChan chanOk ()
-      return ()
-    return ()
-  else if member pidB ?crupt then do
-    fork $ forever $ do
-      (_pidA, mf) <- readChan sbxp2z
-      case mf of 
-        FlipF2P_coin b -> do
-          writeChan a2p (pidB, ClockP2F_Through FlipP2F_start)
-          ma <- readChan p2a
-          let (pidA, FlipF2P_ok) = ma
-          writeChan a2f (Right FlipA2F_DeliverA)
-        FlipF2P_ok -> writeChan chanOk ()
-    return ()
-  else do
-    -- at this point, the simulator has been activated for delivery of all the messages
-    -- handleLeak ensures that the simulation has been started and that the parties have been started
-    -- all you have to do now is wait to see which returns and deliver the message
-    fork $ forever $ do
-      (_pid, mf) <- readChan sbxp2z
-      liftIO $ putStrLn $ "sim: readChan sbxp2z"
-      case mf of 
-        FlipF2P_coin b -> do
-          -- deliver to _pid
-          case () of  
-            _ | _pid == pidA -> writeChan a2f (Right FlipA2F_DeliverA) 
-            _ | _pid == pidB -> writeChan a2f (Right FlipA2F_DeliverB) 
-        FlipF2P_ok -> writeChan chanOk ()
-      return ()
-    return ()
-        
-  -- we need to wait write token to finish init
-  mf <- selectRead z2a f2a
-  liftIO $ putStrLn $ "sim: got activation to init"
-  
-  let sbxProt () = protCoinFlipROUnfair
-  let sbxF () = fTwoWayAndRO
-
-  fork $ execUC_ sbxEnv (runAsyncP $ sbxProt ()) (runAsyncF $ sbxF ()) sbxAdv
-  () <- readChan sbxpump
-  liftIO $ putStrLn $ "init'd simulation"
-
-  case mf of
-    Left m -> writeChan z2a m
-    Right m -> writeChan f2a m
-
-  fork $ forever $ do
-    () <- readChan sbxpump
-    liftIO $ putStrLn $ "Reading pump in sim"
-    writeChan a2z (SttCruptA2Z_F2A $ Left ClockF2A_Pass)
-    return ()
-
-  return ()
-
-testFlipSimHonest :: IO ()
-testFlipSimHonest = runITMinIO 120 $ do
-  treal <- execUC
-        testEnvFlipRealHonest
-        (runAsyncP $ protCoinFlipROUnfair)
-        (runAsyncF $ fTwoWayAndRO)
-        dummyAdversary
-  tideal <- execUC
-        testEnvFlipRealHonest
-        idealProtocol
-        (runAsyncF $ fCoinFlipUnfair)
-        simFlip
-  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
-  liftIO $ putStrLn $ "\nIdeal Transcript: \n" ++ show tideal
-
-testFlipSimCruptSender :: IO ()
-testFlipSimCruptSender = runITMinIO 120 $ do
-  treal <- execUC
-        testEnvFlipRealCruptSender
-        (runAsyncP $ protCoinFlipROUnfair)
-        (runAsyncF $ fTwoWayAndRO)
-        dummyAdversary
-  tideal <- execUC
-        testEnvFlipRealCruptSender
-        idealProtocol 
-        (runAsyncF $ fCoinFlipUnfair)
-        simFlip
-  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
-  liftIO $ putStrLn $ "\nIdeal transcript: \n" ++ show tideal
-
-testFlipSimCruptReceiver :: IO ()
-testFlipSimCruptReceiver = runITMinIO 120 $ do
-  treal <- execUC
-        testEnvFlipRealCruptReceiver
-        (runAsyncP $ protCoinFlipROUnfair)
-        (runAsyncF $ fTwoWayAndRO)
-        dummyAdversary
-  tideal <- execUC
-        testEnvFlipRealCruptReceiver
-        idealProtocol 
-        (runAsyncF $ fCoinFlipUnfair)
-        simFlip
-  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
-  liftIO $ putStrLn $ "\nIdeal transcript: \n" ++ show tideal
+--simFlip :: MonadAdversary m => Adversary 
+--  (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+--                (Either ClockA2F Void))
+--  (SttCruptA2Z (RoF2P ProtFlip_Msg)
+--               (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
+--  (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
+--  (Either (ClockF2A (PID, CoinFlipP2F ProtFlip_Msg)) CoinFlipF2A)
+--  (Either ClockA2F CoinFlipA2F) m
+--simFlip (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
+--  let sid = ?sid :: SID
+--  let (pidA :: PID, pidB :: PID, sssid :: String) = readNote "fMulticast" $ snd sid
+--
+--  a2s <- newChan
+--  a2r <- newChan
+--  
+--  table <- newIORef (Map.empty :: (Map (Int, Bool) Int))
+--  backtable <- newIORef (Map.empty :: (Map Int (Int, Bool)))
+--  comh <- newIORef Nothing
+--
+--  z2a' <- newChan
+--  --fork $ forever $ do
+--  --  mh <- readChan z2a
+--  --  liftIO $ putStrLn $ "sim: readChhan on z2a"
+--  --  case mh of 
+--  --    SttCruptZ2A_A2P (pid, m) | pid == pidA -> do
+--  --                                liftIO $ putStrLn $ "sim: z2a a2p A : " ++ show m
+--  --                                writeChan a2s m
+--  --                             | pid == pidB -> do
+--  --                                liftIO $ putStrLn $ "sim: z2a a2p B : " ++ show m
+--  --                                writeChan a2r m
+--  --    _ -> writeChan z2a' mh
+--  --    -- the Right of the case is Void so we don't care about it
+--        
+--  let functionality (p2f', f2p') (a2f', f2a') (z2f', f2z') = do
+--            fork $ forever $ do
+--              (pid, mf) <- readChan p2f'
+--              liftIO $ putStrLn $ "sim_F: message " ++ show mf
+--              case mf of
+--                RoP2F_Ro (nonce, b) -> do
+--                  tbl <- readIORef table
+--                  if not $ member (nonce, b) tbl then do
+--                    h :: Int <- getNbits 120
+--                    modifyIORef table     (Map.insert (nonce,b) h)
+--                    modifyIORef backtable (Map.insert h (nonce,b)) 
+--                  else return ()
+--                  tbl <- readIORef table
+--                  writeChan f2p' (pid, RoF2P_Ro (tbl ! (nonce, b)))
+--                  --writeChan a2 (SttCruptA2Z_P2A (pidA, RoF2P_Ro (tbl ! (nonce, b))))
+--                RoP2F_m m -> do
+--                  if pid == pidA then do 
+--                    ?leak (pid, m) 
+--                    eventually $ writeChan f2p' (pidB, RoF2P_m m)
+--                    writeChan f2p' (pid, RoF2P_Ok)
+--                  else if pid == pidB then do
+--                    ?leak (pid, m)
+--                    eventually $ writeChan f2p' (pidA, RoF2P_m m)
+--                    writeChan f2p' (pid, RoF2P_Ok)
+--                  else ?pass
+--            return ()
+--
+--  sbxp2z <- newChan
+--  sbxz2p <- newChan
+--  sbxz2f <- newChan
+--  sbxpump <- newChan
+--  chanOk <- newChan
+--
+--  let sbxEnv z2exec (p2z', z2p') (a2z', z2a') (f2z', z2f') pump' outp' = do
+--          liftIO $ putStrLn $ "Going to write crup to sim execuc"
+--          writeChan z2exec $ SttCrupt_SidCrupt ?sid ?crupt
+--          -- if sender is crupt: simulator outputs random bit received by the receiver and that's it
+--          -- also wait wait for the simulation to output and then make the crupt sender also init
+--
+--          forward p2z' sbxp2z
+--          forward sbxz2p z2p'
+--
+--          forward z2a z2a'
+--          forward a2z' a2z
+--  
+--          forward sbxz2f z2f'
+--          
+--          forward pump' sbxpump
+--    
+--          return ()
+--
+--  let handleLeak (pid, m) = do
+--            if member pid ?crupt then return ()
+--            else do
+--              case m of
+--                FlipP2F_start -> do
+--                  -- give start to the internal pid as well
+--                  liftIO $ putStrLn $ "sim: start leak for " ++ show pid
+--                  writeChan sbxz2p (pid, ClockP2F_Through FlipP2F_start)
+--                  readChan chanOk
+--                  -- this always results in a ?pass
+--                _ -> error "shouldn't ever be leaked"
+--            return ()
+--
+--  syncLeaks <- makeSyncLog handleLeak $ do
+--      writeChan a2f $ (Left ClockA2F_GetLeaks)
+--      mf <- readChan f2a
+--
+--      let Left (ClockF2A_Leaks leaks) = mf
+--      return leaks
+--
+--  let sbxAdv (z2a', a2z') (p2a', a2p') (f2a', a2f') = do
+--          fork $ forever $ do
+--            mf <- readChan z2a'
+--            printAdv $ "Intercepted z2a' " ++ show mf
+--            syncLeaks
+--            printAdv $ "forwarding into the sandbox" 
+--            case mf of
+--              SttCruptZ2A_A2F f -> writeChan a2f' f
+--              SttCruptZ2A_A2P pm -> writeChan a2p' pm
+--          fork $ forever $ do
+--            m <- readChan f2a'
+--            writeChan a2z $ SttCruptA2Z_F2A m
+--          fork $ forever $ do
+--            (pid, m) <- readChan p2a'
+--            writeChan a2z' $ SttCruptA2Z_P2A (pid, m)
+--          return ()
+--
+--  if member pidA ?crupt then do
+--    -- if the sender is crupt only simulate the bit that was received from honest receiver
+--    fork $ forever $ do
+--      (_pidB, mf) <- readChan sbxp2z
+--      case mf of 
+--        FlipF2P_coin b -> do
+--          -- implies honest party has already started
+--          writeChan a2p (pidA, ClockP2F_Through FlipP2F_start)
+--          -- this write results in f2a write from functionality
+--          ma <- readChan p2a
+--          let (pidB, FlipF2P_ok) = ma
+--          -- not we deliver pidB
+--          writeChan a2f (Right FlipA2F_DeliverB)
+--        FlipF2P_ok -> writeChan chanOk ()
+--      return ()
+--    return ()
+--  else if member pidB ?crupt then do
+--    fork $ forever $ do
+--      (_pidA, mf) <- readChan sbxp2z
+--      case mf of 
+--        FlipF2P_coin b -> do
+--          writeChan a2p (pidB, ClockP2F_Through FlipP2F_start)
+--          ma <- readChan p2a
+--          let (pidA, FlipF2P_ok) = ma
+--          writeChan a2f (Right FlipA2F_DeliverA)
+--        FlipF2P_ok -> writeChan chanOk ()
+--    return ()
+--  else do
+--    -- at this point, the simulator has been activated for delivery of all the messages
+--    -- handleLeak ensures that the simulation has been started and that the parties have been started
+--    -- all you have to do now is wait to see which returns and deliver the message
+--    fork $ forever $ do
+--      (_pid, mf) <- readChan sbxp2z
+--      liftIO $ putStrLn $ "sim: readChan sbxp2z"
+--      case mf of 
+--        FlipF2P_coin b -> do
+--          -- deliver to _pid
+--          case () of  
+--            _ | _pid == pidA -> writeChan a2f (Right FlipA2F_DeliverA) 
+--            _ | _pid == pidB -> writeChan a2f (Right FlipA2F_DeliverB) 
+--        FlipF2P_ok -> writeChan chanOk ()
+--      return ()
+--    return ()
+--        
+--  -- we need to wait write token to finish init
+--  mf <- selectRead z2a f2a
+--  liftIO $ putStrLn $ "sim: got activation to init"
+--  
+--  let sbxProt () = protCoinFlipROUnfair
+--  let sbxF () = fTwoWayAndRO
+--
+--  fork $ execUC_ sbxEnv (runAsyncP $ sbxProt ()) (runAsyncF $ sbxF ()) sbxAdv
+--  () <- readChan sbxpump
+--  liftIO $ putStrLn $ "init'd simulation"
+--
+--  case mf of
+--    Left m -> writeChan z2a m
+--    Right m -> writeChan f2a m
+--
+--  fork $ forever $ do
+--    () <- readChan sbxpump
+--    liftIO $ putStrLn $ "Reading pump in sim"
+--    writeChan a2z (SttCruptA2Z_F2A $ Left ClockF2A_Pass)
+--    return ()
+--
+--  return ()
+--
+--testFlipSimHonest :: IO ()
+--testFlipSimHonest = runITMinIO 120 $ do
+--  treal <- execUC
+--        testEnvFlipRealHonest
+--        (runAsyncP $ protCoinFlipROUnfair)
+--        (runAsyncF $ fTwoWayAndRO)
+--        dummyAdversary
+--  tideal <- execUC
+--        testEnvFlipRealHonest
+--        idealProtocol
+--        (runAsyncF $ fCoinFlipUnfair)
+--        simFlip
+--  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
+--  liftIO $ putStrLn $ "\nIdeal Transcript: \n" ++ show tideal
+--
+--testFlipSimCruptSender :: IO ()
+--testFlipSimCruptSender = runITMinIO 120 $ do
+--  treal <- execUC
+--        testEnvFlipRealCruptSender
+--        (runAsyncP $ protCoinFlipROUnfair)
+--        (runAsyncF $ fTwoWayAndRO)
+--        dummyAdversary
+--  tideal <- execUC
+--        testEnvFlipRealCruptSender
+--        idealProtocol 
+--        (runAsyncF $ fCoinFlipUnfair)
+--        simFlip
+--  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
+--  liftIO $ putStrLn $ "\nIdeal transcript: \n" ++ show tideal
+--
+--testFlipSimCruptReceiver :: IO ()
+--testFlipSimCruptReceiver = runITMinIO 120 $ do
+--  treal <- execUC
+--        testEnvFlipRealCruptReceiver
+--        (runAsyncP $ protCoinFlipROUnfair)
+--        (runAsyncF $ fTwoWayAndRO)
+--        dummyAdversary
+--  tideal <- execUC
+--        testEnvFlipRealCruptReceiver
+--        idealProtocol 
+--        (runAsyncF $ fCoinFlipUnfair)
+--        simFlip
+--  liftIO $ putStrLn $ "\nReal transcript: \n" ++ show treal
+--  liftIO $ putStrLn $ "\nIdeal transcript: \n" ++ show tideal
 
 
 testEnvFlipIdeal :: MonadEnvironment m =>
-  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-               (SttCruptA2Z (CoinFlipF2P ProtFlip_Msg)
-                           (Either (ClockF2A (PID, (CoinFlipP2F ProtFlip_Msg))) CoinFlipF2A))
-               (SttCruptZ2A (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-                            (Either ClockA2F CoinFlipA2F))
-               Void ClockZ2F () m
+  Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+              (SttCruptA2Z (Either CoinFlipF2P (ChanF2P String))
+                           (Either (ClockF2A (Either (PID, CoinFlipP2F) (PID, ChanP2F String))) CoinFlipF2A))
+              (SttCruptZ2A (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+                           (Either ClockA2F CoinFlipA2F))
+              Void ClockZ2F () m
+--  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
+--               (SttCruptA2Z (CoinFlipF2P ProtFlip_Msg)
+--                            (Either (ClockF2A (PID, (CoinFlipP2F ProtFlip_Msg))) CoinFlipF2A))
+--               (SttCruptZ2A (ClockP2F (CoinFlipP2F ProtFlip_Msg))
+--                            (Either ClockA2F CoinFlipA2F))
+--               Void ClockZ2F () m
 testEnvFlipIdeal z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestIdealFlip", show ("Alice", "Bob", ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList [("Alice",())])
@@ -371,7 +388,10 @@ testEnvFlipIdeal z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   () <- readChan pump
 
   liftIO $ putStrLn $ "\nCrupt Alice Start"
-  writeChan z2a $ (SttCruptZ2A_A2P ("Alice", (ClockP2F_Through $ FlipP2F_start)))
+  writeChan z2a $ (SttCruptZ2A_A2P ("Alice", (ClockP2F_Through $ Left FlipP2F_start)))
+  () <- readChan pump
+
+  writeChan z2p $ ("Bob", ClockP2F_Through $ Right $ ChanP2F_m "hello")
   () <- readChan pump
 
   writeChan z2a $ (SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks)
@@ -390,7 +410,7 @@ testEnvFlipIdeal z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 
   -- Bob honest input
   liftIO $ putStrLn $ "\nBob start"
-  writeChan z2p $ ("Bob", ClockP2F_Through $ FlipP2F_start)
+  writeChan z2p $ ("Bob", ClockP2F_Through $ Left FlipP2F_start)
   () <- readChan pump
   writeChan z2a $ (SttCruptZ2A_A2F $ Left ClockA2F_GetLeaks)
   () <- readChan pump
@@ -461,77 +481,167 @@ fTwoWayAndRO (p2f, f2p) _ _ = do
 data ProtFlip_Msg = ProtFlip_commit Int | ProtFlip_bit Bool | ProtFlip_open Int Bool | ProtFlip_abort deriving (Show, Eq)
 
 protCoinFlipROUnfair :: MonadAsyncP m =>
-  Protocol (ClockP2F (CoinFlipP2F ProtFlip_Msg)) (CoinFlipF2P ProtFlip_Msg) (RoF2P ProtFlip_Msg) (RoP2F (Int, Bool) ProtFlip_Msg) m
+  Protocol (ClockP2F (Either CoinFlipP2F (ChanP2F a))) (Either CoinFlipF2P (ChanF2P a))
+           (RoF2P (Either a ProtFlip_Msg)) (RoP2F (Int, Bool) (Either a ProtFlip_Msg)) m
+  --Protocol (ClockP2F (CoinFlipP2F ProtFlip_Msg)) (CoinFlipF2P ProtFlip_Msg) (RoF2P ProtFlip_Msg) (RoP2F (Int, Bool) ProtFlip_Msg) m
 protCoinFlipROUnfair (z2p, p2z) (f2p, p2f) = do
   let (pidA :: PID, pidB :: PID, sssid :: String) = readNote "fMulticast" $ snd ?sid
+
+  msgChan :: Chan (ChanP2F a) <- newChan
+  protChan :: Chan CoinFlipP2F <- newChan
+  fork $ forever $ do
+    mf <- readChan z2p
+    case mf of
+      ClockP2F_Pass -> ?pass
+      ClockP2F_Through (Left m) -> writeChan protChan m
+      ClockP2F_Through (Right m) -> writeChan msgChan m
+
+  --toProt :: Chan (RoF2P (Either Void ProtFlip_Msg)) <- newChan
+  toProt :: Chan (RoF2P ProtFlip_Msg) <- newChan
+  okChan <- newChan
+  fork $ forever $ do
+    mf <- readChan f2p
+    case mf of
+      RoF2P_Ok -> writeChan okChan ()
+      RoF2P_m (Left m) -> writeChan p2z $ Right (ChanF2P_m m)
+      RoF2P_m (Right m) -> writeChan toProt $ RoF2P_m m
+      RoF2P_Ro h -> writeChan toProt $ RoF2P_Ro h
+
+  fork $ forever $ do
+    (ChanP2F_m m) <- readChan msgChan
+    liftIO $ putStrLn $ "msgChan read"
+    writeChan p2f (RoP2F_m $ Left m)
+    readChan okChan
+    ?pass
+
   case () of
     _ | ?pid == pidA -> do
-      readChan z2p -- Start
+      FlipP2F_start <- readChan protChan
       liftIO $ putStrLn $ "Started pidA"
       -- choose a bit and commit to it in the random oracle
       b <- ?getBit
       nonce :: Int <- getNbits 120
       liftIO $ putStrLn $ "Alice: querying Ro"
       writeChan p2f $ RoP2F_Ro (nonce, b)
-      mh <- readChan f2p
-      let RoF2P_Ro h = mh
-      -- send the hash to the other party and wait for its hash
+      m' <- readChan toProt
+      let (RoF2P_Ro h) = m'
       liftIO $ putStrLn $ "Alice: sending commit"
-      writeChan p2f $ RoP2F_m (ProtFlip_commit h)
-      readChan f2p -- OK
-      -- ?pass
-      writeChan p2z FlipF2P_ok
-      -- wait to receive the other party's bit
-      mf <- readChan f2p
-      let RoF2P_m (ProtFlip_bit b') = mf
-      -- i can compute the coin flip now, send the opening to the other party so they can too
+      writeChan p2f $ RoP2F_m (Right $ ProtFlip_commit h)
+      readChan okChan
+      writeChan p2z $ Left FlipF2P_ok
+      m' <- readChan toProt
+      let RoF2P_m (ProtFlip_bit b') = m'
       liftIO $ putStrLn $ "Alice: sending open"
-      writeChan p2f $ RoP2F_m (ProtFlip_open nonce b)
-      readChan f2p -- OK
-      -- compute and output the coin flip
-      writeChan p2z (FlipF2P_coin $ (b' && not b) || (not b' && b))
+      writeChan p2f $ RoP2F_m (Right $ ProtFlip_open nonce b)
+      readChan okChan
+      writeChan p2z (Left $ FlipF2P_coin $ (b' && not b) || (not b' && b)) 
     _ | ?pid == pidB -> do
-      mf <- readChan z2p -- start
+      m' <- readChan protChan
+      let FlipP2F_start = m'
       liftIO $ putStrLn $ "Started pidB"
-      -- ?pass
-      writeChan p2z FlipF2P_ok
+      writeChan p2z $ Left FlipF2P_ok
       -- recieve the commit
-      mf <- readChan f2p
-      let RoF2P_m (ProtFlip_commit h) = mf
+      m' <- readChan toProt
+      let RoF2P_m (ProtFlip_commit h) = m'
       liftIO $ putStrLn $ "Bob: received commitment: " ++ show h  
       -- send a bit
       b <- ?getBit
       liftIO $ putStrLn $ "Bob: sending bit: " ++ show b
-      writeChan p2f (RoP2F_m (ProtFlip_bit b))
-      readChan f2p -- OK
+      writeChan p2f (RoP2F_m (Right $ ProtFlip_bit b))
+      readChan okChan
       ?pass
       -- wait for opening
-      mf <- readChan f2p
+      mf <- readChan toProt
       case mf of
         RoF2P_m (ProtFlip_open nonce' b') -> do
           liftIO $ putStrLn $ "Received open: " ++ show nonce' ++ " " ++ show b'
           -- check in RO
           writeChan p2f (RoP2F_Ro (nonce', b'))
-          mh <- readChan f2p
-          let RoF2P_Ro h' = mh
+          m' <- readChan toProt
+          let RoF2P_Ro h' = m'
           if h == h' then do
             liftIO $ putStrLn $ "Bob: verified the bit correctly"
-            writeChan p2z (FlipF2P_coin $ (b' && not b) || (not b' && b))
+            writeChan p2z (Left $ FlipF2P_coin $ (b' && not b) || (not b' && b))
           else error "bad commitment"
         RoF2P_m (ProtFlip_abort) -> do
           -- make the flip myself
           b' <- ?getBit
-          writeChan p2z (FlipF2P_coin b')
+          writeChan p2z (Left $ FlipF2P_coin b')
+
+  --case () of
+  --  _ | ?pid == pidA -> do
+  --    readChan z2p -- Start
+  --    liftIO $ putStrLn $ "Started pidA"
+  --    -- choose a bit and commit to it in the random oracle
+  --    b <- ?getBit
+  --    nonce :: Int <- getNbits 120
+  --    liftIO $ putStrLn $ "Alice: querying Ro"
+  --    writeChan p2f $ RoP2F_Ro (nonce, b)
+  --    mh <- readChan f2p
+  --    let RoF2P_Ro h = mh
+  --    -- send the hash to the other party and wait for its hash
+  --    liftIO $ putStrLn $ "Alice: sending commit"
+  --    writeChan p2f $ RoP2F_m (ProtFlip_commit h)
+  --    readChan f2p -- OK
+  --    -- ?pass
+  --    writeChan p2z FlipF2P_ok
+  --    -- wait to receive the other party's bit
+  --    mf <- readChan f2p
+  --    let RoF2P_m (ProtFlip_bit b') = mf
+  --    -- i can compute the coin flip now, send the opening to the other party so they can too
+  --    liftIO $ putStrLn $ "Alice: sending open"
+  --    writeChan p2f $ RoP2F_m (ProtFlip_open nonce b)
+  --    readChan f2p -- OK
+  --    -- compute and output the coin flip
+  --    writeChan p2z (FlipF2P_coin $ (b' && not b) || (not b' && b))
+  --  _ | ?pid == pidB -> do
+  --    mf <- readChan z2p -- start
+  --    liftIO $ putStrLn $ "Started pidB"
+  --    -- ?pass
+  --    writeChan p2z FlipF2P_ok
+  --    -- recieve the commit
+  --    mf <- readChan f2p
+  --    let RoF2P_m (ProtFlip_commit h) = mf
+  --    liftIO $ putStrLn $ "Bob: received commitment: " ++ show h  
+  --    -- send a bit
+  --    b <- ?getBit
+  --    liftIO $ putStrLn $ "Bob: sending bit: " ++ show b
+  --    writeChan p2f (RoP2F_m (ProtFlip_bit b))
+  --    readChan f2p -- OK
+  --    ?pass
+  --    -- wait for opening
+  --    mf <- readChan f2p
+  --    case mf of
+  --      RoF2P_m (ProtFlip_open nonce' b') -> do
+  --        liftIO $ putStrLn $ "Received open: " ++ show nonce' ++ " " ++ show b'
+  --        -- check in RO
+  --        writeChan p2f (RoP2F_Ro (nonce', b'))
+  --        mh <- readChan f2p
+  --        let RoF2P_Ro h' = mh
+  --        if h == h' then do
+  --          liftIO $ putStrLn $ "Bob: verified the bit correctly"
+  --          writeChan p2z (FlipF2P_coin $ (b' && not b) || (not b' && b))
+  --        else error "bad commitment"
+  --      RoF2P_m (ProtFlip_abort) -> do
+  --        -- make the flip myself
+  --        b' <- ?getBit
+  --        writeChan p2z (FlipF2P_coin b')
   return ()
 
 
 testEnvFlipRealHonest :: MonadEnvironment m =>
-  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-              (SttCruptA2Z (RoF2P ProtFlip_Msg) 
-                           (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+  Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+              (SttCruptA2Z (RoF2P (Either String ProtFlip_Msg))
+                           (Either (ClockF2A (PID, Either String ProtFlip_Msg)) Void))
+              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) (Either String ProtFlip_Msg)))
                            (Either ClockA2F Void))
-              Void ClockZ2F CoinFlipTranscript m
+              Void ClockZ2F (CoinFlipTranscript String) m
+  --Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
+  --            (SttCruptA2Z (RoF2P ProtFlip_Msg) 
+  --                         (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
+  --            (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+  --                         (Either ClockA2F Void))
+  --            Void ClockZ2F CoinFlipTranscript m
 testEnvFlipRealHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestIdealFlip", show ("Alice", "Bob", ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid Map.empty
@@ -541,14 +651,21 @@ testEnvFlipRealHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   () <- readChan pump
 
   --writeChan z2a $ (SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2P_m (ProtFlip_commit h)))
-  writeChan z2p ("Alice", ClockP2F_Through FlipP2F_start)
+  writeChan z2p ("Alice", ClockP2F_Through $ Left FlipP2F_start)
   () <- readChan pump
 
-  writeChan z2p ("Bob", ClockP2F_Through FlipP2F_start)
+  writeChan z2p ("Bob", ClockP2F_Through $ Left FlipP2F_start)
   () <- readChan pump
 
   -- deliver Alice's commitment
   liftIO $ putStrLn $ "\nZ: deliver Alice's commitment"
+  writeChan z2a $ SttCruptZ2A_A2F $ Left (ClockA2F_Deliver 0)
+  () <- readChan pump
+
+  writeChan z2p ("Alice", ClockP2F_Through $ Right (ChanP2F_m "hello"))
+  () <- readChan pump
+
+  liftIO $ putStrLn $ "\nZ: deliver hello msg"
   writeChan z2a $ SttCruptZ2A_A2F $ Left (ClockA2F_Deliver 0)
   () <- readChan pump
 
@@ -565,7 +682,7 @@ testEnvFlipRealHonest z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
 
   readIORef transcript >>= writeChan outp 
 
-testFlipRealHonest :: IO CoinFlipTranscript
+testFlipRealHonest :: IO (CoinFlipTranscript String)
 testFlipRealHonest = runITMinIO 120 $ execUC
   testEnvFlipRealHonest
   (runAsyncP $ protCoinFlipROUnfair)
@@ -573,12 +690,12 @@ testFlipRealHonest = runITMinIO 120 $ execUC
   dummyAdversary
 
 testEnvFlipRealCruptReceiver :: MonadEnvironment m =>
-  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-              (SttCruptA2Z (RoF2P ProtFlip_Msg) 
-                           (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+  Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+              (SttCruptA2Z (RoF2P (Either String ProtFlip_Msg))
+                           (Either (ClockF2A (PID, Either String ProtFlip_Msg)) Void))
+              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) (Either String ProtFlip_Msg)))
                            (Either ClockA2F Void))
-              Void ClockZ2F CoinFlipTranscript m
+              Void ClockZ2F (CoinFlipTranscript String) m
 testEnvFlipRealCruptReceiver z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestIdealFlip", show ("Alice", "Bob", ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList [("Bob",())])
@@ -587,7 +704,7 @@ testEnvFlipRealCruptReceiver z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp =
   cmdList <- newIORef []
   () <- readChan pump
 
-  writeChan z2p ("Alice", ClockP2F_Through FlipP2F_start)
+  writeChan z2p ("Alice", ClockP2F_Through $ Left FlipP2F_start)
   () <- readChan pump
 
   -- deliver Alice's commitment
@@ -597,7 +714,7 @@ testEnvFlipRealCruptReceiver z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp =
   
   -- send Alice the same bit all the time
   liftIO $ putStrLn $ "\nZ: give Alice a bit"
-  writeChan z2a $ SttCruptZ2A_A2P ("Bob", ClockP2F_Through $ RoP2F_m $ ProtFlip_bit True)
+  writeChan z2a $ SttCruptZ2A_A2P ("Bob", ClockP2F_Through $ RoP2F_m $ Right $ ProtFlip_bit True)
   () <- readChan pump
 
   -- deliver Bob's bit
@@ -607,7 +724,7 @@ testEnvFlipRealCruptReceiver z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp =
  
   readIORef transcript >>= writeChan outp 
 
-testFlipRealCruptReceiver :: IO CoinFlipTranscript
+testFlipRealCruptReceiver :: IO (CoinFlipTranscript String)
 testFlipRealCruptReceiver = runITMinIO 120 $ execUC
   testEnvFlipRealCruptReceiver
   (runAsyncP $ protCoinFlipROUnfair)
@@ -616,12 +733,12 @@ testFlipRealCruptReceiver = runITMinIO 120 $ execUC
 
 
 testEnvFlipRealCruptSender :: MonadEnvironment m =>
-  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-              (SttCruptA2Z (RoF2P ProtFlip_Msg) 
-                           (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+  Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+              (SttCruptA2Z (RoF2P (Either String ProtFlip_Msg))
+                           (Either (ClockF2A (PID, Either String ProtFlip_Msg)) Void))
+              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) (Either String ProtFlip_Msg)))
                            (Either ClockA2F Void))
-              Void ClockZ2F CoinFlipTranscript m
+              Void ClockZ2F (CoinFlipTranscript String) m
 testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestIdealFlip", show ("Alice", "Bob", ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList [("Alice",())])
@@ -630,7 +747,7 @@ testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   cmdList <- newIORef []
   () <- readChan pump
 
-  writeChan z2p ("Bob", ClockP2F_Through FlipP2F_start)
+  writeChan z2p ("Bob", ClockP2F_Through $ Left FlipP2F_start)
   () <- readChan pump
 
   -- generate a commitment
@@ -643,7 +760,7 @@ testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   let Just (Left (SttCruptA2Z_P2A ("Alice", RoF2P_Ro h))) = mh
 
   liftIO $ putStrLn $ "\nZ: commitment: " ++ show h
-  writeChan z2a $ (SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (ProtFlip_commit h)))
+  writeChan z2a $ (SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (Right $ ProtFlip_commit h)))
   () <- readChan pump
 
   ---- deliver Alice's commitment
@@ -656,13 +773,13 @@ testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   () <- readChan pump
 
   mh <- readIORef lastOut
-  let Just (Left (SttCruptA2Z_P2A ("Alice", RoF2P_m (ProtFlip_bit b')))) = mh
+  let Just (Left (SttCruptA2Z_P2A ("Alice", RoF2P_m (Right (ProtFlip_bit b'))))) = mh
 
   let resultFlip = (b && not b') || (not b && b')
   liftIO $ putStrLn $ "\nZ: resultflip: " ++ show resultFlip
   if resultFlip == False then
-    writeChan z2a $ SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (ProtFlip_abort))
-  else writeChan z2a $ SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (ProtFlip_open nonce b))
+    writeChan z2a $ SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (Right $ ProtFlip_abort))
+  else writeChan z2a $ SttCruptZ2A_A2P ("Alice", ClockP2F_Through $ RoP2F_m (Right $ ProtFlip_open nonce b))
   () <- readChan pump
 
   -- deliver this message
@@ -671,7 +788,7 @@ testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   () <- readChan pump
 
   l <- readIORef lastOut
-  let Just (Right ("Bob", FlipF2P_coin flip)) = l
+  let Just (Right ("Bob", Left (FlipF2P_coin flip))) = l
 
   --liftIO $ putStrLn $ "\nZ: deliver Alice's opening"
   --writeChan z2a $ SttCruptZ2A_A2F $ Left (ClockA2F_Deliver 0)
@@ -682,7 +799,7 @@ testEnvFlipRealCruptSender z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = d
   
   readIORef transcript >>= writeChan outp
 
-testFlipRealCruptSender :: IO CoinFlipTranscript 
+testFlipRealCruptSender :: IO (CoinFlipTranscript String)
 testFlipRealCruptSender = runITMinIO 120 $ execUC
   testEnvFlipRealCruptSender
   (runAsyncP $ protCoinFlipROUnfair)
