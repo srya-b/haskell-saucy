@@ -32,12 +32,16 @@ type CoinInput a b = CoinCmd a b
 type CoinConfig = (SID, PID, PID, CruptList)
 
 testEnvCoinCrupt :: (MonadEnvironment m) => PID -> PID -> Maybe PID ->
-  Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
-              (SttCruptA2Z (RoF2P ProtFlip_Msg) 
-                           (Either (ClockF2A (PID, ProtFlip_Msg)) Void))
-              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+  --Environment (CoinFlipF2P ProtFlip_Msg) (ClockP2F (CoinFlipP2F ProtFlip_Msg))
+  Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
+              --(SttCruptA2Z (RoF2P ProtFlip_Msg) 
+              (SttCruptA2Z (RoF2P (Either String ProtFlip_Msg)) 
+                           --(Either (ClockF2A (PID, ProtFlip_Msg)) Void))
+                           (Either (ClockF2A (PID, Either String ProtFlip_Msg)) Void))
+              --(SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) ProtFlip_Msg))
+              (SttCruptZ2A (ClockP2F (RoP2F (Int, Bool) (Either String ProtFlip_Msg)))
                            (Either ClockA2F Void))
-              Void ClockZ2F CoinFlipTranscript m --(CoinConfig, [Either (CoinInput ProtFlip_Msg (Int, Bool)) AsyncInput], CoinFlipTranscript) m
+              Void ClockZ2F (CoinFlipTranscript String) m --(CoinConfig, [Either (CoinInput ProtFlip_Msg (Int, Bool)) AsyncInput], CoinFlipTranscript) m
 testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidCoin", show(sender, receiver, ""))
   finalFlip <- newIORef False
@@ -50,7 +54,7 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
       case () of
         _ | c == sender -> do
               -- start receiver
-              writeChan z2p (receiver, ClockP2F_Through FlipP2F_start)
+              writeChan z2p (receiver, ClockP2F_Through $ Left FlipP2F_start)
               () <- readChan pump
               modifyIORef cmdList (++ [Left $ CoinCmd_start receiver])
 
@@ -64,7 +68,7 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
               mh <- readIORef lastOut
               let Just (Left (SttCruptA2Z_P2A ("Alice", RoF2P_Ro h))) = mh
 
-              writeChan z2a $ (SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m (ProtFlip_commit h)))
+              writeChan z2a $ (SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m $ Right (ProtFlip_commit h)))
               () <- readChan pump
               modifyIORef cmdList (++ [Left $ CoinCmd_m sender (ProtFlip_commit h)])
 
@@ -80,15 +84,15 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
 
               mb <- readIORef lastOut
               liftIO $ putStrLn $ "mb: " ++ show mb
-              let Just (Left (SttCruptA2Z_P2A (sender, RoF2P_m (ProtFlip_bit b')))) = mb
+              let Just (Left (SttCruptA2Z_P2A (sender, RoF2P_m (Right (ProtFlip_bit b'))))) = mb
               let resultFlip = (b && not b') || (not b && b')
               liftIO $ putStrLn $ "\nZ: resultflip: " ++ show resultFlip
               if resultFlip == True then do
                 modifyIORef cmdList (++ [Left $ CoinCmd_m sender ProtFlip_abort]) 
-                writeChan z2a $ SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m (ProtFlip_abort))
+                writeChan z2a $ SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m $ Right (ProtFlip_abort))
               else do
                 modifyIORef cmdList (++ [Left $ CoinCmd_m sender (ProtFlip_open nonce b)])
-                writeChan z2a $ SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m (ProtFlip_open nonce b))
+                writeChan z2a $ SttCruptZ2A_A2P (sender, ClockP2F_Through $ RoP2F_m  $ Right (ProtFlip_open nonce b))
               () <- readChan pump
           
               -- deliver this message
@@ -98,14 +102,14 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
               modifyIORef cmdList (++ [Right $ (CmdDeliver 0, 0)])
 
               l <- readIORef lastOut
-              let Just (Right (receiver, FlipF2P_coin flip)) = l
+              let Just (Right (receiver, Left (FlipF2P_coin flip))) = l
 
               cl <- readIORef cmdList
               tr <- readIORef transcript
               --writeChan outp ((sid, sender, receiver, (Map.fromList [(c,())])), cl, tr)
               writeChan outp tr
         _ | c == receiver -> do
-              writeChan z2p (sender, ClockP2F_Through FlipP2F_start)
+              writeChan z2p (sender, ClockP2F_Through $ Left FlipP2F_start)
               () <- readChan pump
               modifyIORef cmdList (++ [Left $ CoinCmd_start sender])
 
@@ -115,7 +119,7 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
               modifyIORef cmdList (++ [Right $ (CmdDeliver 0, 0)])
               
               -- send Alice the same bit all the time
-              writeChan z2a $ SttCruptZ2A_A2P (receiver, ClockP2F_Through $ RoP2F_m $ ProtFlip_bit True)
+              writeChan z2a $ SttCruptZ2A_A2P (receiver, ClockP2F_Through $ RoP2F_m $ Right $ ProtFlip_bit True)
               () <- readChan pump
               modifyIORef cmdList (++ [Left $ CoinCmd_m receiver $ ProtFlip_bit True]) 
 
@@ -133,11 +137,11 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
       (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
       () <- readChan pump 
 
-      writeChan z2p (sender, ClockP2F_Through FlipP2F_start)
+      writeChan z2p (sender, ClockP2F_Through $ Left FlipP2F_start)
       () <- readChan pump
       modifyIORef cmdList (++ [Left $ CoinCmd_start sender])
 
-      writeChan z2p (receiver, ClockP2F_Through FlipP2F_start)
+      writeChan z2p (receiver, ClockP2F_Through $ Left FlipP2F_start)
       () <- readChan pump
       modifyIORef cmdList (++ [Left $ CoinCmd_start receiver])
 
@@ -165,7 +169,7 @@ testEnvCoinCrupt sender receiver crupt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) p
 
 firstFlip [] = error "no output found"
 firstFlip (t:tr) = case t of
-                     Right (pid, FlipF2P_coin b) -> b
+                     Right (pid, (Left (FlipF2P_coin b))) -> b
                      _ -> firstFlip tr
 
 prop_distribution = monadicIO $ do

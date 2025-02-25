@@ -446,3 +446,54 @@ fCoinChan (a = LotteryMsg)
 
 compose:
     
+
+
+51% ((3,2),5)
+30% ((4,1),5)
+ 7% ((5,0),5)
+ 6% ((3,2),0)
+ 4% ((4,1),0)
+ 2% ((5,0),0)
+
+
+
+
+
+### We leav off
+the import changing doesn't seem to increase chances of decision even when all 5 have the same input
+assert (majority == 5 && numDecided > 0) and look at what the output says for why it wasn't decided
+
+
+in regular aba if the coin flip is T (in r=1):
+* parties that propose T will either decide T or have v = {0,1}
+    In either case, they will SBCast(F, False) and have bp[1] = True, bp[0] = False
+* parties that propose F will either
+    SBCast(F, True) and have bp[1] = False and bp[0] = False (v = {0})
+    or
+    SBCast(F, False) and have bp[1] = True and bp[0] = False  (v = {0,1})
+
+so the goal should be to get bp[0] = True in this round. Basically try to get the opposite of the coin flip to be delivered as well
+
+
+
+if adv prefers outcome 0
+
+first flip is 0 with probability 1/2
+  "     "  "  1   "      ""      1/2
+
+if output is 1 abort and require a second flip
+output of the protocol is 1 with probability 1/4
+and probability 0 with prob 1/2 + 1/4 = 3/4
+
+so it biases in its favor
+
+
+ideal functionality where bias can happen but not favor the adversary
+
+f_coin (p1, p2):
+  - crupt p2
+  - on input b from pi: store b as the preference of pi
+  - after input from both:
+      . b <-$- {0,1}
+      . if abort from adv and b == b2: flip again
+      . if abort from adv and b != b2:  

@@ -286,6 +286,110 @@ propBenOrSafety one two dec stat rnd = monadicIO $ do
         assert $ (maxRound - minRound) <= 1
         --assert $ n < 2
 
+benOrEnvTest
+  :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
+  Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
+     (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 
+                  (Either (ClockF2A (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int)))
+                          (SID, (MulticastF2A BenOrMsg, TransferTokens Int))))
+     ((SttCruptZ2A (ClockP2F (SID, ((BenOrMsg, TransferTokens Int), CarryTokens Int))) 
+                  (Either ClockA2F (SID, (MulticastA2F BenOrMsg, TransferTokens Int)))), CarryTokens Int) Void
+     (ClockZ2F) (BenOrConfig, [Either BenOrInput AsyncInput], BenOrTranscript) m
+benOrEnvTest parties crupts importAmt z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
+  let extendRight conf = show ("", conf)
+  liftIO $ putStrLn $ "Parties: " ++ show parties 
+  liftIO $ putStrLn $ "Crupt: " ++ show crupts
+  let parties = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"] :: [PID]
+  let t = 1 :: Int
+  let crupt = "Alice" :: PID
+  let honest = parties \\ crupts
+  let sssid = "sidTestACast"
+  let sid = (sssid, show (parties, t, ""))
+ 
+  let cruptMapList = map (\x -> (x,())) crupts
+  writeChan z2exec $ SttCrupt_SidCrupt sid (Map.fromList cruptMapList)
+  
+  cmdList <- newIORef []  
+  (lastOut, transcript, clockChan, leakLimited) <- envReadOut p2z a2z
+  
+  let valueFilter msg = case msg of
+                          One r b -> (1,r,b)
+                          Two r -> (2,r,False)
+                          TwoD r b -> (3,r,b)  
+  
+  (deliverer, deliverByPairs, getByPairs, getBySenders, getByReceivers, getByFilter, getLeaks) <- envMapQueue z2a a2z clockChan lastOut pump valueFilter cmdList
+
+  () <- readChan pump
+  modifyIORef cmdList $ (++) [Right (CmdGetCount, 1000)]
+  
+  c <- envQueueSize z2a clockChan 1000
+  
+  let inputs = do [return True, return False]
+ 
+  let inputTokens = importAmt
+  
+  let pidsT = ["Alice", "Bob", "Charlie"]
+  let pidsF = ["Dave", "Eve"]
+  forMseq_ pidsT $ \p -> do
+    writeChan z2p $ (p, ((ClockP2F_Through $ BenOrP2F_Input True), SendTokens 1000))
+    readChan pump
+
+  forMseq_ pidsF $ \p -> do
+    writeChan z2p $ (p, ((ClockP2F_Through $ BenOrP2F_Input False), SendTokens 1000))
+    readChan pump
+
+  forMseq_ [1..10] $ \r -> do
+     
+    let sssid = multicastSid sssid "Frank" parties ("one" ++ show r)
+    writeChan z2a $ asyncA2PMs "Frank" (
+    
+
+  -- generate a censor list 
+  someHonest <- liftIO $ generate $ elements honest
+  censorPairs <- liftIO $ generate $ shuffle [(x,y) | (x:ys) <- tails honest, y <- ys, x == someHonest || y == someHonest] 
+
+  -- Make the protocol run --
+  firstInp <- newIORef []
+  forMseq_ [1..50] $ \r -> do
+    modifyIORef cmdList $ (++) [Right (CmdGetCount, 0)]
+    c <- envQueueSize z2a clockChan 0
+
+    forMseq_ crupts $ \cpid -> do
+      -- ADV INPUT with only some delivers (not all messages) --
+      forMseq_ [1..10] $ \idx -> do
+        rprime <- liftIO $ generate $ arbitrary
+        inps <- liftIO $ generate $ benOrGeneratorOnlyMsgs 1 c (multicastSid sssid cpid parties) ["Dave"] inputs rprime inputTokens
+
+        -- EXEC ADV INPUT --
+        forMseq_ inps $ \i -> do
+          modifyIORef cmdList $ (++ [Left i])
+          envExecBenOrCmd z2p z2a pump i
+
+    -- execute some subset of the current set of honest party messages 
+    -- c was assigned before any crupt messages were delivered
+
+    f <- liftIO $ generate $ arbitrary `suchThat` (> 1)
+    inps <- liftIO $ generate $ frequency [ (3, rqDeliverChoice c f), (1, rqDeliverAll c) ]
+    forMseq_ inps $ \inp -> do
+      modifyIORef cmdList $ (++ [Right (inp,0)])
+      deliverer censorPairs inp
+
+    -- sometimes deliver all the messages between the censored parties
+    b :: Int <- liftIO $ generate $ choose (1,5) 
+    if b < 3 then do
+      () <- deliverByPairs censorPairs
+      return ()
+    else return ()
+    return ()
+  
+  tr <- readIORef transcript
+  cl <- readIORef cmdList
+
+  liftIO $ putStrLn $ "\n\t someHonest: " ++ show censorPairs
+  liftIO $ putStrLn $ "\t pairs: " ++ show censorPairs
+  
+  writeChan outp ((sid, parties, (Map.fromList cruptMapList), t), cl, tr)
+
 benOrEnvTrackDecideRound :: (MonadEnvironment m) => [PID] -> [PID] -> Int ->
   Environment BenOrF2P ((ClockP2F BenOrP2F), CarryTokens Int)
      (SttCruptA2Z (SID, (MulticastF2P BenOrMsg, CarryTokens Int)) 

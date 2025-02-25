@@ -145,6 +145,103 @@ not expecting messages from previous rounds
 environements expected to complete:
 -- an error like bin_ptr being reset causes them to not decide and go past some upper bound number of rounds: compute probability of taking that long normall, get expected value, and compare to the results of the tests run
 
+failure in the underlying broadcast primitive:
+-- sbroadcast is flawed even if the logic of aba is correct
+
+common coin failure
+-- t+1 honest vs t+1 any
+-- common coin immediately returns
+
+# Environments
+testEnvABADeliverAll:
+    * choose random input for all 
+    * al <- generate 10 random adv messages
+    * dl <- AllRandom -> rqDeliverAll
+            Sequential -> rqDeliverAllSeq
+            ProtocolOrder -> shuffled ESTs -> shuffled AUXs
+    * shuffle (al ++ dl)
+    LOOP for `rounds`
+
+testUEnvABAPartition: 
+    * partition parties and give all inputs
+    * deliver EST within partitions
+    * deliver . choose random x: some set honest set [p] EST(x)
+    * deliver . shuffle . 5 adv EST messages
+    * shuffle (allAuxs r) ++ (10 adv aux messages) and deliver
+    * give all ESTs to  
+
+testUEnvABAAdvEstAndAux
+    * same as above except allESTs are taken before deliovering auxs which is weird
+
+testUEnvABALemma17
+    * partition and all inputs
+    * ESTs by partition
+    * choose random x: some set honest set [p] EST(x)
+    * give ESTs to [p]
+    * 5 crupt EST messages -> shuffle -> execute
+    * IDENTICAL TO THE ABOVE?
+
+testUEnvABABetterAdv
+    * partition and all inputs
+    * give EST by partition
+    * choose random x: some set honest set [p] EST(x)  OR  all EST(x) ??
+    * gen 10 crupt EST
+    * shuiffle and give crupt + est
+    * shuffle allAuxs r ++ 10 crupt AUX and deliver
+
+testUEnvABASim
+    * partition and all inputs
+    * give EST by partition
+    * choose random x: some set honest set [p] EST(x)
+    * gen 5 EST messages shuffle and deliver
+    * shuffle (allAux r) ++ (10 crupt aux messages) and deliver 
+    * deliver all ESTs
+
+testABASimShuffle
+    * partition and all inputs
+    * deliver . shuffle . subList . (allEsts r)
+    * deliver . shuffle . 10 crupt EST messages 
+    * deliver . shuffle . subList . (allAux r)
+    * deliver . shuffle . 10 crupt AUX messages
+    * deliver . allEsts r
+    * deliver . allAuxs r
+
+testABALiveness
+    * do the MMR liveness bug
+
+testABA
+    *  
+
+
+All Generators
+---------------
+    1. partition and all inputs
+    2.   
+      a). EST(choose x) by partition     .. partiion, estandaux, lemma17, abasim
+      b). sublist EST                    .. simshuffle
+      c). wait                           .. betteradv
+    3.   
+      a). crupt EST deliver              .. partition, estandaux, lemma17, abasim, simshuffle
+      b). crupt EST + partition          .. betteradv
+    4.
+      a). cruptAux                       .. simshuffle
+      b). allaux + cruptaux              .. partition, estandaux, lemma17, betteradv, abasim
+    5.
+      a). allEsts                        .. partition, estandaux, lemma17, abasim, simshuffle
+      b). _                              .. betteradv
+
+round number message validation -- still one message per person per round number but allow messages from previous rounds 
+reset binptr -- shouldn't cause a safety failure on its own
+aux_any -- discover a bug even in the correct implementation of the protocol that we cross reference with the literature
+back to mmr (new sbcast everytime + bad common coin)
+SBCast Threshold tweaking -- should make a difference on termination based on input
+ABA threshold tweaking -- easy and is caught even with the most trivial generators, should make a difference on input for liveness too
+sbroadcast failure -- failures in the assumed primitives propagates up largely and causes failures
+not setting support coin correctly -- supportCoin is set to False if bp = {0,1} instead of True
+                                      only corrupt part can cause liveness failure because we have to ensure that players get an AUX
+                                      message from both values to ensure view = {0,1} always
+
+
 
 
 Andrew Meeting
@@ -373,3 +470,77 @@ shuffle (all aux + adv aux)
 all rest EST
 
 with loooooww probability it fails 
+
+
+
+
+
+
+
+
+# TODO: deterministic coin flip in BrokenABA.hs
+
+n = 4, t = 1
+echo: t = 1
+deliver 2t = 2
+
+aux: n-t-1 = 2
+
+A = 0
+B = 1
+C = 1
+D = crupt
+
+# A decide 0
+crupt D send EST(0) to C => C deliver 0 => bcast AUX(0)
+crupt D send AUX(0) to C => coin flip = 0 ==> decide 0
+
+# B,C deliver both and coin flip = 1
+B,C exchane EST(1) => deliver 1
+D gives B,C EST(0) => echo EST(0) => exchange => deliver 0
+B,C bcast AUX(1)
+give AUX(1) thensleves and AUX(0) from A
+bin = {0,1}
+coin = 0 => sc = true
+
+
+next round => 
+B,C don't bcast anythin but x_i = 0
+make them decide 1
+--> new instanc of SB(1, False)
+D give crupt EST(1) => echo
+exchane EST(1) => deliver 1
+=> AUX(1) => exchange coin flip = 1 => decide 1
+
+
+
+round r:
+choose one partition and make it decide
+give the other partition both messages and make it decide
+try to make the opposite of the coin flip decide
+
+A = 0
+B = 1
+C = 1
+D = crupt
+
+SSC
+crupt D sends EST(0) to A => 2t = AUX(0)
+n-t = 3
+
+B,C exchange EST(1) => deliver and AUX(1)
+D casuses aceho EST(0) in B,C => deliver 0
+
+A gets 2xAUX(0) and 1xAUX(1) 
+B,C gets 3xAUX(1)
+
+A view = {0}
+
+
+
+
+If the environment forced the ideal world to deliver something:
+* if we only give enough for 2 rounds and all but one set of inputs decides in that time, it suggests there may be something there
+* if we increase the rounds and it still doesn't happen, that is a stronger signal
+* if eventually decisions happen it doesn't indicate anything is wrong but only suggests that the running time is dependent on the input parameters: do the imput parameters make sense?
+

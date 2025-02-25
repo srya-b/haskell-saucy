@@ -140,3 +140,9 @@ _goal is to determine how many parties need to propose a value after which it's 
 -- run __(1) benOrEnvRandomRounds__
 -- pre (all honest decide)
 -- collect (round where last party decided)
+
+
+## Strategy
+* stock up (2,1,1) messages for one party and get it to decide
+* stock up (2,1,0) messages and get another to decide that value
+* deliver some set of current messages and then some set of previous messages from previous rounds

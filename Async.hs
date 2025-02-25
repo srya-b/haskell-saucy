@@ -108,8 +108,8 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
         writeChan f2a $ (Left $ ClockF2A_Leaks l)
       Left (ClockA2F_Deliver idx) -> do
                      q <- readIORef runqueue
-                     liftIO $ putStrLn $ "length q " ++ show (length q)
-                     liftIO $ putStrLn $ "idx " ++ show idx
+                     --liftIO $ putStrLn $ "length q " ++ show (length q)
+                     --liftIO $ putStrLn $ "idx " ++ show idx
                      if (length q) > idx then do
                        rq <- readIORef runqueue
                        modifyIORef runqueue (deleteNth idx)
@@ -121,7 +121,7 @@ runAsyncF f (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
                      if rounds > 0 then do
                        dl <- readIORef delay
                        writeIORef delay (dl+rounds)
-                       liftIO $ putStrLn $ "New delay: " ++ (show (dl+rounds))
+                       --liftIO $ putStrLn $ "New delay: " ++ (show (dl+rounds))
                      else
                        return()
                      writeChan f2a $ Left ClockF2A_Pass
@@ -195,6 +195,7 @@ fAuth (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
     -- Sender can only send message once
     _ <- readIORef recorded
     -- if _ == False then error "recorded problem" else do
+    (pid, m) <- readChan p2f
     if not (pid == pidS) then error "Invalid sender to fAuth" 
     else do
       writeIORef recorded True
@@ -210,6 +211,7 @@ testEnvAuthAsync z2exec (p2z, z2p) (a2z, z2a) (f2z, z2f) pump outp = do
   let sid = ("sidTestAuthAsync", show ("Alice", "Bob", ""))
   writeChan z2exec $ SttCrupt_SidCrupt sid empty
   fork $ forever $ do
+    x <- readChan p2z
     x <- readChan p2z
     liftIO $ putStrLn $ "Z: p sent " ++ show x
     ?pass
@@ -390,6 +392,26 @@ runAsyncP prot (z2p, p2z) (f2p, p2f) = do
   let ?pass = pass in
      prot (z2p, p2z) (f2p,p2f')
 
+type MonadAsyncTestP m = (MonadProtocol m,
+                                ?pass :: m ())
+
+--data StatesGet a = States_Get | States_state a deriving (Show, Eq)
+type StateAsk = ()
+type StateGet a = a
+
+runAsyncTestP :: MonadProtocol m => Chan StateAsk -> Chan (StateGet a) ->
+  (MonadAsyncTestP m => Chan StateAsk -> Chan (StateGet a) -> Protocol z2p p2z f2p p2f m) ->
+    Protocol z2p p2z f2p (ClockP2F p2f) m
+runAsyncTestP stateAsk stateGet prot (z2p, p2z) (f2p, p2f) = do
+  -- protocol can't set arbitrary set of IORefs, it must react to a call for state
+  let pass = do
+        writeChan p2f ClockP2F_Pass
+  p2f' <- wrapWrite ClockP2F_Through p2f
+
+  let ?pass = pass in
+     prot stateAsk stateGet (z2p, p2z) (f2p, p2f')
+
+
 --runAsyncPEventually :: MonadProtocol m =>
 --  (MonadAsyncP m => Protocol z2p p2z f2p p2f m) ->
 --     Protocol z2p p2z f2p (ClockP2F p2f) m
@@ -413,42 +435,41 @@ runAsyncP prot (z2p, p2z) (f2p, p2f) = do
 --     prot (z2p, p2z) (f2p,p2f')
         
 
-type MonadTestableP m = (MonadProtocol m,
-                            ?pass :: m (),
-                            ?require :: Bool -> String -> m ())
-
-runTestableP :: MonadProtocol m =>
-  (MonadTestableP m => Protocol z2p p2z f2p p2f m) ->
-    Protocol z2p p2z f2p (ClockP2F p2f) m
-runTestableP prot (z2p, p2z) (f2p, p2f) = do
-  let pass = do
-        writeChan p2f ClockP2F_Pass
-  f2p' <- newChan
-  z2p' <- newChan
-  p2f' <- wrapWrite ClockP2F_Through p2f
-  
-  failed <- newIORef False
-  let require cond msg = 
-          if not cond then do
-            liftIO $ putStrLn $ msg
-            ?pass
-            writeIORef failed True
-          else return ()
-  
-  fork $ forever $ do
-    m <- readChan f2p
-    f <- readIORef failed
-    if f then ?pass
-    else writeChan f2p' m
-
-  fork $ forever $ do
-    m <- readChan z2p
-    f <- readIORef failed 
-    if f then ?pass
-    else writeChan z2p' m
-
-  let ?pass = pass
-      ?require = require in
-          prot (z2p', p2z) (f2p', p2f')
-    
+--type MonadTestableP m = (MonadProtocol m,
+--                            ?pass :: m (),
+--                            ?require :: Bool -> String -> m ())
+--
+--runTestableP :: MonadProtocol m =>
+--  (MonadTestableP m => Protocol z2p p2z f2p p2f m) ->
+--    Protocol z2p p2z f2p (ClockP2F p2f) m
+--runTestableP prot (z2p, p2z) (f2p, p2f) = do
+--  let pass = do
+--        writeChan p2f ClockP2F_Pass
+--  f2p' <- newChan
+--  z2p' <- newChan
+--  p2f' <- wrapWrite ClockP2F_Through p2f
+--  
+--  failed <- newIORef False
+--  let require cond msg = 
+--          if not cond then do
+--            liftIO $ putStrLn $ msg
+--            ?pass
+--            writeIORef failed True
+--          else return ()
+--  
+--  fork $ forever $ do
+--    m <- readChan f2p
+--    f <- readIORef failed
+--    if f then ?pass
+--    else writeChan f2p' m
+--
+--  fork $ forever $ do
+--    m <- readChan z2p
+--    f <- readIORef failed 
+--    if f then ?pass
+--    else writeChan z2p' m
+--
+--  let ?pass = pass
+--          prot (z2p', p2z) (f2p', p2f')
+--    
   

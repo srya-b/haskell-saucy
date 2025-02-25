@@ -540,7 +540,7 @@ simComm (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
    return () 
   else return ()
 
-  if member pidR ?crupt then do
+  f member pidR ?crupt then do
    fork $ do
     -- Functionality
     (_, mf) <- readChan p2a

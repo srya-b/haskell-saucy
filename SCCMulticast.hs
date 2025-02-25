@@ -28,6 +28,116 @@ data CoinCastF2P a = CoinCastF2P_OK | CoinCastF2P_Deliver a | CoinCastF2P_ro Boo
 data CoinCastA2F a = CoinCastA2F_Deliver PID (a, TransferTokens Int) | CoinCastA2F_ro Int deriving (Show, Eq)
 data CoinCastF2A = CoinCastF2A_ro Bool deriving (Show, Eq)
 
+
+--{- In this strong coin the value is only revealed after it's been called by t+1 parties -}
+--fMulticastAndStrongCoin :: MonadFunctionalityAsync m ((t, TransferTokens Int), CarryTokens Int) =>
+--    Functionality (CoinCastP2F t, CarryTokens Int) (CoinCastF2P t, CarryTokens Int)
+--                  (CoinCastA2F t, TransferTokens Int) CoinCastF2A Void Void m 
+--fMulticastAndStrongCoin (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
+--  let sid = ?sid :: SID
+--  let (pidS :: PID, parties :: [PID], t :: Int, sssid :: String) = readNote "fMulticastAndCoinToken" $ snd sid
+--  let useTokens = False
+--  tokens <- newIORef 0
+--  -- strong coin requires the same coin for each party in a round
+--  coinFlips <- newIORef (empty :: Map Int Bool)
+--  pending <- newIORef (empty :: Map PID ())
+--  
+--  let print x = do
+--          liftIO $ putStrLn $ x
+--  -- strong coin requires the same coin for each party in a round
+--  coinFlips <- newIORef (empty :: Map Int Bool)
+--
+--  let require cond msg = 
+--            if not cond then do
+--                liftIO $ putStrLn $ "\n\n\t[fMulticastToken Error]>>>>>>>" ++ show msg ++ "\n"
+--                ?pass
+--                readChan =<< newChan
+--            else return ()
+--  
+--  if not $ member pidS ?crupt then do
+--    fork $ forever $ do
+--      (pid, x) <- readChan p2f
+--      case x of
+--        (CoinCastP2F_cast (m, DeliverTokensWithMessage st), SendTokens a) -> do
+--          require (a >= 0) "negative tokens sent"
+--          modifyIORef tokens $ (+) a
+--          if pid == pidS then do
+--{- TODO: is defaulting to sending 0 token the right thing or just halt ? -}
+--            ?leak ((m, DeliverTokensWithMessage st), SendTokens a)
+--            forMseq_ parties $ \pidR -> do
+--              eventually $ do
+--                liftIO $ putStrLn $ "eventually doing SCC send"
+--                tk <- readIORef tokens
+--                if (tk >= 1)  then do
+--                  --require (tk >= st) ("Not enough tokens. Need " ++ show st ++ ", have " ++ showf)
+--                  writeIORef tokens (max 0 (tk-1-st))
+--                  writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens (min st (tk-1))))
+--                else return () -- ?pass
+--            writeChan f2p (pidS, (CoinCastF2P_OK, SendTokens 0))
+--          else ?pass 
+--        (CoinCastP2F_ro r, SendTokens a) -> do
+--          liftIO $ putStrLn $ "ro request a: " ++ show a
+--          -- if < t pending requests hold off until t+1
+--          modifyIORef pending $ Map.insert pid ()
+--          l <- readIORef pending >>= return . Map.size
+--          if l < t+1 then
+--            ?pass
+--          else do
+--            tk <- readIORef tokens
+--            modifyIORef tokens $ (+) (a-1)
+--            cf <- readIORef coinFlips
+--            if not $ member r cf then do
+--              -- TODO: change to be bias
+--              -- P[0] = 1/4 P[1] = 3/4
+--              --b <- ?getBit
+--              bn <- getNbits 2
+--              let b = if bn==1 then False else True
+--              liftIO $ putStrLn $ "coin if not member"
+--              modifyIORef coinFlips $ Map.insert r b
+--              ps <- readIORef pending
+--              forMseq_ ps $ \p -> do
+--                eventually $ writeChan f2p (p, (CoinCastF2P_ro b, SendTokens 0))
+--              ?pass
+--            else do
+--              liftIO $ putStrLn $ "coin already cast"
+--              b <- readIORef coinFlips >>= return . (! r)
+--              -- just send it straight to the participant, i know this is kind of wonky
+--              -- TODO: think some more about how to deliver if waiting
+--              writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
+--  else do
+--    delivered <- newIORef (empty :: Map PID ())
+--    fork $ forever $ do
+--      --(x, SendTokens tk) <- readChan a2f 
+--      (x, DeliverTokensWithMessage tk) <- readChan a2f 
+--      require (tk>=0) "negative tokens sent"
+--      modifyIORef tokens $ (+) tk
+--      case x of
+--        CoinCastA2F_Deliver pidR (m, DeliverTokensWithMessage st) -> do
+--          del <- readIORef delivered
+--          --if member pidR del then return ()
+--          if member pidR del then do
+--            liftIO $ putStrLn $ "receiver already had something delivered in this instance"
+--            ?pass
+--          else do
+--            liftIO $ putStrLn $ "coin case deliverY"
+--            tks <- readIORef tokens
+--            if  (tks >= st) then do 
+--            --require (tks >= st) ("not enough tokens. need " ++ show st ++ ", have " ++ show tks)
+--              liftIO $ putStrLn $ "delivering"
+--              modifyIORef tokens $ (subtract st)
+--              modifyIORef delivered $ Map.insert pidR ()
+--              writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens st))
+--            else ?pass
+--        CoinCastA2F_ro x -> do
+--{- TODO: should the adv directly observe this? -}
+--          require (tk > 0) "no free ro queries >:(" 
+--          cf <- readIORef coinFlips
+--          writeChan f2a (CoinCastF2A_ro True)
+--  return ()
+
+advCoinP2A m = c
+             where (Just (Left (SttCruptA2Z_P2A (_, (_rosid, (CoinCastF2P_ro c, SendTokens _)))))) = m
+
 -- TODO: currently adv sends for free, we should change that
 {- We have   (CoinCastA2F t, TranferTokens Int) becuase runTokenA requires it -}
 fMulticastAndCoinToken :: MonadFunctionalityAsync m ((t, TransferTokens Int), CarryTokens Int) =>
@@ -66,18 +176,21 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
             ?leak ((m, DeliverTokensWithMessage st), SendTokens a)
             forMseq_ parties $ \pidR -> do
               eventually $ do
-                liftIO $ putStrLn $ "eventually doing SCC send"
+                --liftIO $ putStrLn $ "eventually doing SCC send"
                 tk <- readIORef tokens
                 if (tk >= 1)  then do
                   --require (tk >= st) ("Not enough tokens. Need " ++ show st ++ ", have " ++ showf)
                   writeIORef tokens (max 0 (tk-1-st))
                   writeChan f2p (pidR, (CoinCastF2P_Deliver m, SendTokens (min st (tk-1))))
-                else return () -- ?pass
+                else do
+                  --liftIO $ putStrLn $ "out of tokens"
+                  ?pass
+                  --return () -- ?pass
             writeChan f2p (pidS, (CoinCastF2P_OK, SendTokens 0))
           else ?pass 
         (CoinCastP2F_ro r, SendTokens a) -> do
           --require (a>=0) "no free ro queries >:("
-          liftIO $ putStrLn $ "ro request a: " ++ show a
+          --liftIO $ putStrLn $ "ro request a: " ++ show a
           tk <- readIORef tokens
           --liftIO $ putStrLn $ "tokens bfore coin: " ++ show tk
           modifyIORef tokens $ (+) (a-1)
@@ -87,15 +200,19 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           cf <- readIORef coinFlips
           if not $ member r cf then do
             -- TODO: change to be bias
-            -- P[0] = 1/4 P[1] = 3/4
-            --b <- ?getBit
-            bn <- getNbits 2
-            let b = if bn==1 then False else True
-            liftIO $ putStrLn $ "coin if not member"
+            -- getBit 2 => P[0] = 1/4 P[1] = 3/4
+            b' <- ?getBit
+            --bn <- getNbits 2
+            --let b = if bn==1 then False else True
+            -- TODO: debuggiong statement
+            --let b = if r==1 then False
+            --        else True 
+            let b = b'
+            --liftIO $ putStrLn $ "coin if not member"
             modifyIORef coinFlips $ Map.insert r b
             writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
           else do
-            liftIO $ putStrLn $ "coin already cast"
+            --liftIO $ putStrLn $ "coin already cast"
             b <- readIORef coinFlips >>= return . (! r)
             writeChan f2p (pid, (CoinCastF2P_ro b, SendTokens 0))
   else do
@@ -110,7 +227,7 @@ fMulticastAndCoinToken (p2f, f2p) (a2f, f2a) (z2f, f2z) = do
           del <- readIORef delivered
           --if member pidR del then return ()
           if member pidR del then do
-            liftIO $ putStrLn $ "receiver already had something delivered in this instance"
+            --liftIO $ putStrLn $ "receiver already had something delivered in this instance"
             ?pass
           else do
             liftIO $ putStrLn $ "coin case deliverY"

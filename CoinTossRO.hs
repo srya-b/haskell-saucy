@@ -39,8 +39,9 @@ type CoinFlipTranscript a = [Either
 
 data CoinFlipA2F a = FlipA2F_DeliverA | FlipA2F_DeliverB | FlipA2F_Deliver PID a deriving (Show, Eq)
 data CoinFlipF2A = FlipF2A_Flip Bool deriving (Show, Eq)
+data CoinFlipLeak = CoinFlipLeak_Start | CoinFlipLeak_Result Bool deriving (Show, Eq)
 
-fCoinFlipUnfair :: (Eq a, Show a, MonadFunctionalityAsync m (PID, Either CoinFlipP2F (ChanP2F a))) =>
+fCoinFlipUnfair :: (Eq a, Show a, MonadFunctionalityAsync m (PID, Either CoinFlipLeak (ChanP2F a))) =>
   Functionality (Either CoinFlipP2F (ChanP2F a)) (Either CoinFlipF2P (ChanF2P a))
                 (CoinFlipA2F a) CoinFlipF2A Void Void m
 fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
@@ -66,15 +67,18 @@ fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
     if not a && (pid == pidA) then writeIORef startA True
     else if not b && (pid == pidB) then writeIORef startB True
     else error "Not A or B start msg"
-    ?leak (pid, Left FlipP2F_start)
+    ?leak (pid, Left CoinFlipLeak_Start)
     
     a <- readIORef startA
     b <- readIORef startB
     if a && b then do
       b <- ?getBit
       writeIORef bit b
+      liftIO $ putStrLn $ "ready"
       writeIORef ready True
+      ?leak (pid, Left $ CoinFlipLeak_Result b)
     else return ()
+    liftIO $ putStrLn $ "Giving control back"
     writeChan f2p (pid, Left FlipF2P_ok)
 
   fork $ forever $ do
@@ -104,6 +108,11 @@ fCoinFlipUnfair (p2f, f2p) (a2f, f2a) _ = do
           else ?pass
   return ()
 
+justResults [] = []
+justResults (x:xs) = case x of
+                       (_, (pid, Left (CoinFlipLeak_Result b))) -> [b] ++ (justResults xs)
+                       _ -> justResults xs
+
 --
 makeSyncLog handler req = do
   ctr <- newIORef 0
@@ -123,7 +132,7 @@ simFlip :: (Show a, Eq a, MonadAdversary m) => Adversary
   (SttCruptA2Z (RoF2P (Either a ProtFlip_Msg))
                (Either (ClockF2A (PID, Either a ProtFlip_Msg)) Void))   -- a2z
   (Either CoinFlipF2P (ChanF2P a)) (ClockP2F (Either CoinFlipP2F (ChanP2F a)))   -- p2a, a2p
-  (Either (ClockF2A (PID, Either CoinFlipP2F (ChanP2F a))) CoinFlipF2A)   -- f2a
+  (Either (ClockF2A (PID, Either CoinFlipLeak (ChanP2F a))) CoinFlipF2A)   -- f2a
   (Either ClockA2F (CoinFlipA2F a)) m   -- a2f
 simFlip (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
   let sid = ?sid :: SID
@@ -224,7 +233,7 @@ simFlip (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
             if member pid ?crupt then return ()
             else do
               case m of
-                Left FlipP2F_start -> do
+                Left CoinFlipLeak_Start -> do
                   -- give start to the internal pid as well
                   liftIO $ putStrLn $ "sim: start leak for " ++ show pid
                   writeChan sbxz2p (pid, ClockP2F_Through $ Left FlipP2F_start)
@@ -237,6 +246,8 @@ simFlip (z2a, a2z) (p2a, a2p) (f2a, a2f) = do
                   liftIO $ putStrLn $ "******sim: send msg"
                   writeChan sbxz2p (pid, ClockP2F_Through $ Right (ChanP2F_m m'))
                   readChan chanOk
+                Left (CoinFlipLeak_Result b) -> -- don't need to do anything just ignore i
+                  return ()
                 _ -> error "shouldn't ever be leaked"
             return ()
 
@@ -401,7 +412,7 @@ testFlipSimCruptReceiver = runITMinIO 120 $ do
 testEnvFlipIdeal :: MonadEnvironment m =>
   Environment (Either CoinFlipF2P (ChanF2P String)) (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
               (SttCruptA2Z (Either CoinFlipF2P (ChanF2P String))
-                           (Either (ClockF2A (PID, Either CoinFlipP2F (ChanP2F String))) CoinFlipF2A))
+                           (Either (ClockF2A (PID, Either CoinFlipLeak (ChanP2F String))) CoinFlipF2A))
               (SttCruptZ2A (ClockP2F (Either CoinFlipP2F (ChanP2F String)))
                            (Either ClockA2F (CoinFlipA2F a)))
               Void ClockZ2F () m

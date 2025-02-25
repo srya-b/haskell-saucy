@@ -157,6 +157,13 @@ updateIndex :: Int -> [Int] -> [Int]
 updateIndex ref [] = []
 updateIndex ref (x:xs) = [if x > ref then (x-1) else x] ++ (updateIndex ref xs)
 
+updateIndexMixed :: Int -> [Either a (AsyncCmd, b)] -> [Either a (AsyncCmd, b)]
+updateIndexMixed ref [] = []
+updateIndexMixed ref (x:xs) = case x of
+                                Right (CmdDeliver i, b) -> [Right (CmdDeliver (if i > ref then (i-1) else i), b)] ++ (updateIndexMixed ref xs)
+                                _ -> [x] ++ (updateIndexMixed ref xs)
+                                --Left i -> [Left i] ++ (updateIndexMixed ref xs) 
+
 -- given an set of indices to censor, generate a deliver list     
 --rqDeliverWithCensor :: [Int] -> Int -> Gen [AsyncCmd]
 --rqDeliverWithCensor censoredIdxs n = frequency 
@@ -170,6 +177,14 @@ updateIndex ref (x:xs) = [if x > ref then (x-1) else x] ++ (updateIndex ref xs)
 deliverListAll :: [Int] -> [AsyncCmd]
 deliverListAll [] = []
 deliverListAll (x:xs) = [CmdDeliver x] ++ deliverListAll (updateIndex x xs)
+
+deliverListAllMixed :: [Either a (AsyncCmd, b)] -> [Either a (AsyncCmd, b)]
+deliverListAllMixed [] = []
+deliverListAllMixed (x:xs) = case x of 
+                               Right (CmdDeliver i, b) -> [Right (CmdDeliver i, b)] ++ deliverListAllMixed (updateIndexMixed i xs)
+                               _ -> [x] ++ deliverListAllMixed xs
+                               --Right _ -> [x] ++ deliverListAllMixed xs
+                               --Left i -> [Left i] ++ deliverListAllMixed xs
 
 countPOutputs :: [Either _ a] -> a -> IO Int
 countPOutputs transcript output = do
@@ -216,13 +231,15 @@ envReadOut _p2z _a2z = do
         modifyIORef leakLimited $ (++ [Left tail]) 
         ?pass
       SttCruptA2Z_F2A (Left ClockF2A_Pass) -> do
-        liftIO $ putStrLn $ "Pass"
+        --liftIO $ putStrLn $ "Pass"
         writeIORef lastOut (Just (Left m))
         ?pass
       _ -> do 
         writeIORef lastOut (Just (Left m))
         ?pass
   return (lastOut, transcript, clockChan, leakLimited) 
+
+asyncA2PMsg pid m tk = ((SttCruptZ2A_A2P (pid, ClockP2F_Through m)), SendTokens tk)
 
 -- returns the current size of the queue
 envQueueSize :: (MonadEnvironment m) =>
@@ -288,6 +305,18 @@ compareTranscript (a:as) (b:bs) =
 invert :: (a,b) -> (b,a)
 invert (a,b) = (b,a)
 
+--type MonadSimP m a = (MonadProtocol m,
+--                     ?setState :: a -> m (),
+--                     ?getState :: m a)
+--
+--
+--runSimP :: MonadAsyncP m l =>
+--  (MonadSimP m a => Chan (m a) -> Protocol z2p p2z f2p p2f m) ->
+--    Protocol z2p p2z f2p f2p p2f m
+--runSimP stateChan prot (z2p, p2z) (f2p, p2f) = do
+  
+
+
 {- VERY HELPFUL FOR ADVERSARIAL SCHEDULUING 
    a process that grabs all leaks from fMulticast (!fMulticast) 
    determines which indices in the queue correspond to which sender/receiver pair
@@ -309,7 +338,7 @@ envMapQueue :: (MonadEnvironment m, Eq a, Show _leak, Show a, Show f2a, Show f2p
     m ( [(PID,PID)] -> AsyncCmd -> m (),  -- doDeliver
         [(PID,PID)] -> m (),              -- deliverByPairs
         (PID,PID) -> m [Int],             -- getByPair
-        PID -> m [Int],                   -- getBySender
+        [PID] -> m [Int],                   -- getBySenders
         [PID] -> m [Int],                 -- getByReceiver
         a -> m [Int],                     -- getByFilter 
         m [(SID, ((_leak, TransferTokens Int), CarryTokens Int))] )   -- getLeaks
@@ -360,8 +389,10 @@ envMapQueue z2a a2z clockChan lastOut pump fil cmdList = do
               rv <- readIORef recvVal
               modifyIORef sendPairs (deleteNth idx)
               modifyIORef recvVal (deleteNth idx)
+              --liftIO $ putStrLn $ "delivering: " ++ show idx
               writeChan z2a $ ((SttCruptZ2A_A2F $ Left (ClockA2F_Deliver idx)), SendTokens st)
               modifyIORef cmdList $ (++ [Right (CmdDeliver idx, st)])
+
   let doDeliver censorList cmd = do
                case cmd of 
                  (CmdDeliver idx') -> do
@@ -390,6 +421,11 @@ envMapQueue z2a a2z clockChan lastOut pump fil cmdList = do
               let idxs = map fst $ filter (\(_,(s,r)) -> p == s) $ zip [0..] sp
               return idxs
 
+  let getBySenders (ps :: [PID]) = do
+              ret <- newIORef []
+              forMseq_ ps $ \p -> getBySender p >>= modifyIORef ret . (++)
+              readIORef ret
+
   let getByReceiver (p :: PID) = do
               () <- alwaysCall
               sp <- readIORef sendPairs
@@ -409,7 +445,7 @@ envMapQueue z2a a2z clockChan lastOut pump fil cmdList = do
               let idxs = map fst $ filter (\(idx, (p', v)) -> (v == x)) $ zip [0..] vr
               return idxs
   
-  return (doDeliver, deliverByPairs, getByPair, getBySender, getByReceivers, getByFilter, getLeaks)
+  return (doDeliver, deliverByPairs, getByPair, getBySenders, getByReceivers, getByFilter, getLeaks)
 
 generateM :: MonadIO m => Gen a -> m a
 generateM g = do liftIO $ generate $ g
